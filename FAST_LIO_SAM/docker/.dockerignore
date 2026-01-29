@@ -1,0 +1,27 @@
+# 忽略构建目录
+FAST_LIO_SAM/build/
+FAST_LIO_SAM/devel/
+FAST_LIO_SAM/.catkin_workspace
+
+# 忽略日志文件
+FAST_LIO_SAM/Log/
+*.log
+*.txt
+
+# 忽略git文件
+.git/
+.gitignore
+
+# 忽略文档和图片（可选，减少镜像大小）
+FAST_LIO_SAM/doc/
+FAST_LIO_SAM/pic/
+
+# 忽略其他临时文件
+*.swp
+*.swo
+*~
+.DS_Store
+
+
+
+
