@@ -232,12 +232,12 @@ int historyKeyframeSearchNum;         //   回环时多少个keyframe拼成subma
 float historyKeyframeFitnessScore;    // icp 匹配阈值
 bool potentialLoopFlag = false;
 
-ros::Publisher pubHistoryKeyFrames;  //  发布 loop history keyframe submap
-ros::Publisher pubIcpKeyFrames;
-ros::Publisher pubRecentKeyFrames;
-ros::Publisher pubRecentKeyFrame;
-ros::Publisher pubCloudRegisteredRaw;
-ros::Publisher pubLoopConstraintEdge;
+rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubHistoryKeyFrames;  // loop history keyframe submap
+rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubIcpKeyFrames;
+rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubRecentKeyFrames;
+rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubRecentKeyFrame;
+rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubCloudRegisteredRaw;
+rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr pubLoopConstraintEdge;
 
 bool aLoopIsClosed = false;
 map<int, int> loopIndexContainer;  // from new to old
@@ -280,8 +280,8 @@ gtsam::ISAM2* isam;
 gtsam::Values isamCurrentEstimate;
 Eigen::MatrixXd poseCovariance;
 
-ros::Publisher pubLaserCloudSurround;
-ros::Publisher pubOptimizedGlobalMap;  //   发布最后优化的地图
+rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubLaserCloudSurround;
+rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubOptimizedGlobalMap;  // 最终优化地图
 
 bool recontructKdTree = false;
 int updateKdtreeCount = 0;         //  每100次更新一次
@@ -302,7 +302,7 @@ V3D Gnss_T_wrt_Lidar(Zero3d);
 bool gnss_inited = false;  //  是否完成gnss初始化
 shared_ptr<GnssProcess> p_gnss(new GnssProcess());
 GnssProcess gnss_data;
-ros::Publisher pubGnssPath;
+rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pubGnssPath;
 nav_msgs::msg::Path gps_path;
 vector<double> extrinT_Gnss2Lidar(3, 0.0);
 vector<double> extrinR_Gnss2Lidar(9, 0.0);
@@ -313,8 +313,8 @@ float globalMapVisualizationPoseDensity;
 float globalMapVisualizationLeafSize;
 
 // saveMap
-ros::ServiceServer srvSaveMap;
-ros::ServiceServer srvSavePose;
+rclcpp::Service<fast_lio_sam::srv::SaveMap>::SharedPtr srvSaveMap;
+rclcpp::Service<fast_lio_sam::srv::SavePose>::SharedPtr srvSavePose;
 bool savePCD;             // 是否保存地图
 string savePCDDirectory;  // 保存路径
 
@@ -427,13 +427,13 @@ PointTypePose trans2PointTypePose(float transformIn[]) {
 /**
  * 发布thisCloud，返回thisCloud对应msg格式
  */
-sensor_msgs::msg::PointCloud2 publishCloud(ros::Publisher* thisPub, pcl::PointCloud<PointType>::Ptr thisCloud,
+sensor_msgs::msg::PointCloud2 publishCloud(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr thisPub, pcl::PointCloud<PointType>::Ptr thisCloud,
                                       rclcpp::Time thisStamp, std::string thisFrame) {
     sensor_msgs::msg::PointCloud2 tempCloud;
     pcl::toROSMsg(*thisCloud, tempCloud);
     tempCloud.header.stamp = thisStamp;
     tempCloud.header.frame_id = thisFrame;
-    if (thisPub->getNumSubscribers() != 0) thisPub->publish(tempCloud);
+    if (thisPub->get_subscription_count() != 0) thisPub->publish(tempCloud);
     return tempCloud;
 }
 
@@ -560,7 +560,7 @@ void visualizeLoopClosure() {
 
     markerArray.markers.push_back(markerNode);
     markerArray.markers.push_back(markerEdge);
-    pubLoopConstraintEdge.publish(markerArray);
+    pubLoopConstraintEdge->publish(markerArray);
 }
 
 /**
@@ -986,7 +986,7 @@ void performLoopClosure() {
         //     return;
         // 发布闭环匹配关键帧局部map
         if (pubHistoryKeyFrames.getNumSubscribers() != 0)
-            publishCloud(&pubHistoryKeyFrames, prevKeyframeCloud, timeLaserInfoStamp, odometryFrame);
+            publishCloud(pubHistoryKeyFrames, prevKeyframeCloud, timeLaserInfoStamp, odometryFrame);
     }
 
     // ICP Settings
@@ -1012,7 +1012,7 @@ void performLoopClosure() {
     if (pubIcpKeyFrames.getNumSubscribers() != 0) {
         pcl::PointCloud<PointType>::Ptr closed_cloud(new pcl::PointCloud<PointType>());
         pcl::transformPointCloud(*cureKeyframeCloud, *closed_cloud, icp.getFinalTransformation());
-        publishCloud(&pubIcpKeyFrames, closed_cloud, timeLaserInfoStamp, odometryFrame);
+        publishCloud(pubIcpKeyFrames, closed_cloud, timeLaserInfoStamp, odometryFrame);
     }
 
     // 闭环优化得到的当前关键帧与闭环关键帧之间的位姿变换
@@ -1502,7 +1502,7 @@ void map_incremental() {
 
 PointCloudXYZI::Ptr pcl_wait_pub(new PointCloudXYZI(500000, 1));
 PointCloudXYZI::Ptr pcl_wait_save(new PointCloudXYZI());
-void publish_frame_world(const ros::Publisher& pubLaserCloudFull)  //    将稠密点云从 imu convert to  world
+void publish_frame_world(const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr& pubLaserCloudFull)  //    将稠密点云从 imu convert to  world
 {
     if (scan_pub_en) {
         PointCloudXYZI::Ptr laserCloudFullRes(dense_pub_en ? feats_undistort : feats_down_body);
@@ -1517,7 +1517,7 @@ void publish_frame_world(const ros::Publisher& pubLaserCloudFull)  //    将稠�
         pcl::toROSMsg(*laserCloudWorld, laserCloudmsg);
         laserCloudmsg.header.stamp = rclcpp::Time(static_cast<int64_t>((lidar_end_time) * 1e9), RCL_ROS_TIME);
         laserCloudmsg.header.frame_id = "camera_init";
-        pubLaserCloudFull.publish(laserCloudmsg);
+        pubLaserCloudFull->publish(laserCloudmsg);
         publish_count -= PUBFRAME_PERIOD;
     }
 
@@ -1547,7 +1547,7 @@ void publish_frame_world(const ros::Publisher& pubLaserCloudFull)  //    将稠�
     }
 }
 
-void publish_frame_body(const ros::Publisher& pubLaserCloudFull_body)  //   发布body系(imu)下的点云
+void publish_frame_body(const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr& pubLaserCloudFull_body)  //   发布body系(imu)下的点云
 {
     int size = feats_undistort->points.size();
     PointCloudXYZI::Ptr laserCloudIMUBody(new PointCloudXYZI(size, 1));
@@ -1560,11 +1560,11 @@ void publish_frame_body(const ros::Publisher& pubLaserCloudFull_body)  //   发�
     pcl::toROSMsg(*laserCloudIMUBody, laserCloudmsg);
     laserCloudmsg.header.stamp = rclcpp::Time(static_cast<int64_t>((lidar_end_time) * 1e9), RCL_ROS_TIME);
     laserCloudmsg.header.frame_id = "body";
-    pubLaserCloudFull_body.publish(laserCloudmsg);
+    pubLaserCloudFull_body->publish(laserCloudmsg);
     publish_count -= PUBFRAME_PERIOD;
 }
 
-void publish_effect_world(const ros::Publisher& pubLaserCloudEffect) {
+void publish_effect_world(const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr& pubLaserCloudEffect) {
     PointCloudXYZI::Ptr laserCloudWorld(new PointCloudXYZI(effct_feat_num, 1));
     for (int i = 0; i < effct_feat_num; i++) {
         RGBpointBodyToWorld(&laserCloudOri->points[i], &laserCloudWorld->points[i]);
@@ -1573,15 +1573,15 @@ void publish_effect_world(const ros::Publisher& pubLaserCloudEffect) {
     pcl::toROSMsg(*laserCloudWorld, laserCloudFullRes3);
     laserCloudFullRes3.header.stamp = rclcpp::Time(static_cast<int64_t>((lidar_end_time) * 1e9), RCL_ROS_TIME);
     laserCloudFullRes3.header.frame_id = "camera_init";
-    pubLaserCloudEffect.publish(laserCloudFullRes3);
+    pubLaserCloudEffect->publish(laserCloudFullRes3);
 }
 
-void publish_map(const ros::Publisher& pubLaserCloudMap) {
+void publish_map(const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr& pubLaserCloudMap) {
     sensor_msgs::msg::PointCloud2 laserCloudMap;
     pcl::toROSMsg(*featsFromMap, laserCloudMap);
     laserCloudMap.header.stamp = rclcpp::Time(static_cast<int64_t>((lidar_end_time) * 1e9), RCL_ROS_TIME);
     laserCloudMap.header.frame_id = "camera_init";
-    pubLaserCloudMap.publish(laserCloudMap);
+    pubLaserCloudMap->publish(laserCloudMap);
 }
 
 template <typename T>
@@ -1595,12 +1595,12 @@ void set_posestamp(T& out) {
     out.pose.orientation.w = geoQuat.w;
 }
 
-void publish_odometry(const ros::Publisher& pubOdomAftMapped) {
+void publish_odometry(const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr& pubOdomAftMapped) {
     odomAftMapped.header.frame_id = "camera_init";
     odomAftMapped.child_frame_id = "body";
     odomAftMapped.header.stamp = rclcpp::Time(static_cast<int64_t>((lidar_end_time) * 1e9), RCL_ROS_TIME);  // rclcpp::Time(static_cast<int64_t>((lidar_end_time) * 1e9), RCL_ROS_TIME);
     set_posestamp(odomAftMapped.pose);
-    pubOdomAftMapped.publish(odomAftMapped);
+    pubOdomAftMapped->publish(odomAftMapped);
     auto P = kf.get_P();
     for (int i = 0; i < 6; i++) {
         int k = i < 3 ? i + 3 : i - 3;
@@ -1625,7 +1625,7 @@ void publish_odometry(const ros::Publisher& pubOdomAftMapped) {
     br.sendTransform(tf::StampedTransform(transform, odomAftMapped.header.stamp, "camera_init", "body"));
 }
 
-void publish_path(const ros::Publisher pubPath) {
+void publish_path(const rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr& pubPath) {
     set_posestamp(msg_body_pose);
     msg_body_pose.header.stamp = rclcpp::Time(static_cast<int64_t>((lidar_end_time) * 1e9), RCL_ROS_TIME);
     msg_body_pose.header.frame_id = "camera_init";
@@ -1635,7 +1635,7 @@ void publish_path(const ros::Publisher pubPath) {
     jjj++;
     if (jjj % 10 == 0) {
         path.poses.push_back(msg_body_pose);
-        pubPath.publish(path);
+        pubPath->publish(path);
 
         //  save  unoptimized pose
         V3D rot_ang(Log(state_point.rot.toRotationMatrix()));  //   旋转向量
@@ -1650,7 +1650,7 @@ void publish_path(const ros::Publisher pubPath) {
     }
 }
 
-void publish_path_update(const ros::Publisher pubPath) {
+void publish_path_update(const rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr& pubPath) {
     rclcpp::Time timeLaserInfoStamp = rclcpp::Time(static_cast<int64_t>((lidar_end_time) * 1e9), RCL_ROS_TIME);  //  时间戳
     string odometryFrame = "camera_init";
     if (pubPath.getNumSubscribers() != 0) {
@@ -1661,20 +1661,20 @@ void publish_path_update(const ros::Publisher pubPath) {
             // path.poses.push_back(globalPath);
             globalPath.header.stamp = timeLaserInfoStamp;
             globalPath.header.frame_id = odometryFrame;
-            pubPath.publish(globalPath);
+            pubPath->publish(globalPath);
         }
     }
 }
 
 //  发布gnss 轨迹
-void publish_gnss_path(const ros::Publisher pubPath) {
+void publish_gnss_path(const rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr& pubPath) {
     gps_path.header.stamp = rclcpp::Time(static_cast<int64_t>((lidar_end_time) * 1e9), RCL_ROS_TIME);
     gps_path.header.frame_id = "camera_init";
 
     static int jjj = 0;
     jjj++;
     if (jjj % 10 == 0) {
-        pubPath.publish(gps_path);
+        pubPath->publish(gps_path);
     }
 }
 
@@ -1881,7 +1881,7 @@ bool saveMapService(fast_lio_sam::save_mapRequest& req, fast_lio_sam::save_mapRe
     // visial optimize global map on viz
     rclcpp::Time timeLaserInfoStamp = rclcpp::Time(static_cast<int64_t>((lidar_end_time) * 1e9), RCL_ROS_TIME);
     string odometryFrame = "camera_init";
-    publishCloud(&pubOptimizedGlobalMap, globalSurfCloudDS, timeLaserInfoStamp, odometryFrame);
+    publishCloud(pubOptimizedGlobalMap, globalSurfCloudDS, timeLaserInfoStamp, odometryFrame);
 
     // 输出HBA格式的数据
     outputHBA(surfCloudKeyFrames, cloudKeyPoses6D, saveMapDirectory);
@@ -1949,7 +1949,7 @@ void publishGlobalMap() {
                                                  globalMapVisualizationLeafSize);  // for global map visualization
     downSizeFilterGlobalMapKeyFrames.setInputCloud(globalMapKeyFrames);
     downSizeFilterGlobalMapKeyFrames.filter(*globalMapKeyFramesDS);
-    publishCloud(&pubLaserCloudSurround, globalMapKeyFramesDS, timeLaserInfoStamp, odometryFrame);
+    publishCloud(pubLaserCloudSurround, globalMapKeyFramesDS, timeLaserInfoStamp, odometryFrame);
 }
 
 // 构造H矩阵
