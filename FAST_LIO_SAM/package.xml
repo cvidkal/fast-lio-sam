@@ -1,0 +1,68 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>fast_lio_sam</name>
+  <version>0.1.0</version>
+  <description>
+    FAST-LIO-SAM (ROS2 Humble port). Tightly-coupled LiDAR-Inertial Odometry
+    on top of FAST-LIO2, augmented with SAM-style pose graph optimization
+    and loop closure for globally consistent maps.
+
+    See PORTING.md for the staged port from ROS1 (catkin) to ROS2 (ament_cmake).
+  </description>
+  <maintainer email="cctgyh@outlook.com">chenguojun</maintainer>
+  <license>BSD-3-Clause</license>
+
+  <author email="zhangji@cmu.edu">Ji Zhang (original LOAM)</author>
+  <author>HKU-MARS Lab (FAST-LIO / FAST-LIO2)</author>
+  <author email="cctgyh@outlook.com">chenguojun (fast-lio-sam fork)</author>
+
+  <!-- ============ build system ============ -->
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>rosidl_default_generators</buildtool_depend>
+
+  <!-- ============ rosidl interfaces ============ -->
+  <depend>builtin_interfaces</depend>
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>visualization_msgs</depend>
+
+  <!-- ============ runtime ============ -->
+  <depend>rclcpp</depend>
+  <depend>rclcpp_components</depend>
+  <depend>tf2</depend>
+  <depend>tf2_ros</depend>
+  <depend>tf2_geometry_msgs</depend>
+  <depend>tf2_eigen</depend>
+
+  <!-- ============ point cloud (引入到 stage 3+, 当前 stage 2 不依赖) ============
+  <depend>pcl_conversions</depend>
+  <depend>pcl_ros</depend>
+  <depend>pcl_msgs</depend>
+  <depend>laser_geometry</depend>
+  -->
+
+  <!-- ============ Livox (stage 3+ 引入) ============
+  <depend>livox_ros_driver2</depend>
+  -->
+
+  <!-- ============ bag I/O (wrapper/bag_io.* 转 ROS2 时启用) ============
+  <depend>rosbag2_cpp</depend>
+  -->
+
+  <exec_depend>rosidl_default_runtime</exec_depend>
+
+  <!-- ============ test ============ -->
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_cmake_gtest</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+
+  <!-- ============ rosidl 接口分组声明 ============ -->
+  <member_of_group>rosidl_interface_packages</member_of_group>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
