@@ -43,13 +43,14 @@ find_package(tf2_eigen REQUIRED)
 # ----- stage 3 启用 -----
 find_package(pcl_conversions REQUIRED)
 find_package(pcl_ros REQUIRED)
-find_package(PCL 1.10 REQUIRED COMPONENTS common io filters kdtree search)
+find_package(PCL 1.10 REQUIRED COMPONENTS common io filters kdtree search registration)
 find_package(Eigen3 3.3 REQUIRED NO_MODULE)
 find_package(livox_ros_driver2 REQUIRED)
-find_package(OpenMP REQUIRED)              # FAST-LIO 在 preprocess + laserMapping 用了 omp_get_wtime / #pragma omp
+find_package(OpenMP REQUIRED)
 # ----- stage 4 启用 -----
-# find_package(GTSAM REQUIRED)             # SAM 模块, apt: ros-humble-gtsam
-# find_package(rosbag2_cpp REQUIRED)       # wrapper/bag_io 改造时
+find_package(GTSAM REQUIRED)              # SAM/PGO 模块 (apt: ros-humble-gtsam, 4.2+)
+find_package(visualization_msgs REQUIRED) # 闭环 marker
+find_package(rosbag2_cpp REQUIRED)        # wrapper/bag_io.cc 离线 bag 回放
 
 # ============================================================
 # rosidl 接口生成 (msg + srv)
@@ -68,16 +69,23 @@ rosidl_generate_interfaces(${PROJECT_NAME}
 ament_export_dependencies(rosidl_default_runtime)
 
 # ============================================================
-# stage 3: 把 preprocess + ImuProcess (header-only, compiled-via-placeholder)
-#          编进可执行. laserMapping 真主体在 stage 4 加进来.
+# stage 4: 完整 fastlio_mapping
+#   src/laserMapping.cpp + src/preprocess.cpp + include/ikd-Tree/ikd_Tree.cpp
+#   wrapper/bag_io.cc (有 #ifdef ROS1 双支持, 我们走 ROS2 分支)
+#
+# 注意: 不再编译 laser_mapping_node_placeholder.cpp (它的活儿被
+#       laserMapping.cpp 替代了)
 # ============================================================
 add_executable(fastlio_mapping
-  src/laser_mapping_node_placeholder.cpp
+  src/laserMapping.cpp
   src/preprocess.cpp
+  include/ikd-Tree/ikd_Tree.cpp
+  wrapper/bag_io.cc
 )
 target_include_directories(fastlio_mapping PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/include
   ${CMAKE_CURRENT_SOURCE_DIR}/src
+  ${CMAKE_CURRENT_SOURCE_DIR}/wrapper
 )
 ament_target_dependencies(fastlio_mapping
   rclcpp
@@ -85,17 +93,23 @@ ament_target_dependencies(fastlio_mapping
   geometry_msgs
   nav_msgs
   sensor_msgs
+  visualization_msgs
   pcl_conversions
   pcl_ros
   livox_ros_driver2
+  tf2
+  tf2_ros
+  tf2_geometry_msgs
+  rosbag2_cpp
 )
 target_link_libraries(fastlio_mapping
   ${PCL_LIBRARIES}
   Eigen3::Eigen
   OpenMP::OpenMP_CXX
+  gtsam
 )
 
-# 让节点也能用我们自己生成的接口 (Pose6D/SaveMap/SavePose)
+# 让节点用上我们生成的接口 (Pose6D / SaveMap / SavePose)
 rosidl_get_typesupport_target(cpp_typesupport_target
   ${PROJECT_NAME} "rosidl_typesupport_cpp")
 target_link_libraries(fastlio_mapping ${cpp_typesupport_target})
