@@ -80,12 +80,12 @@ add_executable(fastlio_mapping
   src/laserMapping.cpp
   src/preprocess.cpp
   include/ikd-Tree/ikd_Tree.cpp
-  wrapper/bag_io.cc
+  # wrapper/bag_io.cc        # 依赖内部 lightning 框架, ROS2 port 暂时不编;
+                             # 离线回放走 `ros2 bag play --clock`
 )
 target_include_directories(fastlio_mapping PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/include
   ${CMAKE_CURRENT_SOURCE_DIR}/src
-  ${CMAKE_CURRENT_SOURCE_DIR}/wrapper
 )
 ament_target_dependencies(fastlio_mapping
   rclcpp
@@ -107,6 +107,7 @@ target_link_libraries(fastlio_mapping
   Eigen3::Eigen
   OpenMP::OpenMP_CXX
   gtsam
+  Geographic   # apt: libgeographic-dev (WGS84 -> ENU 转换, 用于 GNSS_Processing)
 )
 
 # 让节点用上我们生成的接口 (Pose6D / SaveMap / SavePose)

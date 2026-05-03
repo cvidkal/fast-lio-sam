@@ -99,11 +99,14 @@
 #include "fast_lio_sam/srv/save_pose.hpp"
 
 // save data in kitti format
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <sstream>
 
-#include "bag_io.h"
+// ROS2 port: wrapper/bag_io 依赖内部 lightning 框架 (IMUPtr / Vec3d 等),
+// 暂时禁用. 离线回放用 `ros2 bag play --clock` 即可, 见 launch/*.launch.py.
+// #include "bag_io.h"
 #include <thread>
 
 // using namespace gtsam;
@@ -137,7 +140,7 @@ condition_variable sig_main_loop_finished;
 mutex mtx_main_loop;
 int main_loop_flag = 0;
 int lidar_buffer_flag = 0;
-RosbagIO bag_io;
+// RosbagIO bag_io;       // 见 #include 注释, ROS2 port 屏蔽
 std::thread* rosbag_thread = nullptr;
 
 string root_dir = ROOT_DIR;
@@ -660,11 +663,11 @@ void addGPSFactor() {
     static PointType lastGPSPoint;  // 最新的gps数据
     while (!gnss_buffer.empty()) {
         // 删除当前帧0.2s之前的里程计
-        if (gnss_buffer.front().rclcpp::Time(header.stamp).seconds() < lidar_end_time - 0.05) {
+        if (rclcpp::Time(gnss_buffer.front().header.stamp).seconds() < lidar_end_time - 0.05) {
             gnss_buffer.pop_front();
         }
         // 超过当前帧0.2s之后，退出
-        else if (gnss_buffer.front().rclcpp::Time(header.stamp).seconds() > lidar_end_time + 0.05) {
+        else if (rclcpp::Time(gnss_buffer.front().header.stamp).seconds() > lidar_end_time + 0.05) {
             break;
         } else {
             nav_msgs::msg::Odometry thisGPS = gnss_buffer.front();
@@ -1290,7 +1293,8 @@ void imu_cbk(const sensor_msgs::msg::Imu::ConstSharedPtr& msg_in) {
     // lidar 和 imu时间差过大，且开启 时间同步, 纠正当前输入imu的时间
     if (abs(timediff_lidar_wrt_imu) > 0.1 && time_sync_en) {
         // 对输入imu时间，纠正为 时间差 + 原始时间
-        msg->header.stamp = rclcpp::Time(static_cast<int64_t>((timediff_lidar_wrt_imu + rclcpp::Time(msg_in->header.stamp) * 1e9), RCL_ROS_TIME).seconds());
+        const double corrected = timediff_lidar_wrt_imu + rclcpp::Time(msg_in->header.stamp).seconds();
+        msg->header.stamp = rclcpp::Time(static_cast<int64_t>(corrected * 1e9), RCL_ROS_TIME);
     }
 
     double timestamp = rclcpp::Time(msg->header.stamp).seconds();
@@ -1431,11 +1435,11 @@ bool sync_packages(MeasureGroup& meas) {
     }
 
     /*** push imu data, and pop from imu buffer ***/
-    double imu_time = imu_buffer.front()->rclcpp::Time(header.stamp).seconds();  // 最旧IMU时间
+    double imu_time = rclcpp::Time(imu_buffer.front()->header.stamp).seconds();  // 最旧 IMU 时间
     meas.imu.clear();
-    while ((!imu_buffer.empty()) && (imu_time < lidar_end_time))  // 记录imu数据，imu时间小于当前帧lidar结束时间
+    while ((!imu_buffer.empty()) && (imu_time < lidar_end_time))  // 记录 imu 数据, imu 时间小于当前帧 lidar 结束时间
     {
-        imu_time = imu_buffer.front()->rclcpp::Time(header.stamp).seconds();
+        imu_time = rclcpp::Time(imu_buffer.front()->header.stamp).seconds();
         if (imu_time > lidar_end_time) break;
         meas.imu.push_back(imu_buffer.front());  // 记录当前lidar帧内的imu数据到meas.imu
         imu_buffer.pop_front();
@@ -2129,13 +2133,14 @@ int main(int argc, char** argv) {
     // ROS2 参数声明 + 读取小帮手
     auto declare_param = [&node](auto && name, auto && def, auto * dst) {
         using T = std::decay_t<decltype(def)>;
-        node->declare_parameter<T>(name, def);
+        node->template declare_parameter<T>(name, def);
         node->get_parameter(name, *dst);
     };
     auto declare_param_def = [&node](auto && name, auto && def) {
         using T = std::decay_t<decltype(def)>;
-        node->declare_parameter<T>(name, def);
-        return node->get_parameter(name).get_value<T>();
+        node->template declare_parameter<T>(name, def);
+        // 在 generic lambda 里 T 是 dependent type, 需要 template 消歧
+        return node->get_parameter(name).template get_value<T>();
     };
 
     declare_param("publish.path_en",                path_en,            &path_en);
@@ -2170,8 +2175,12 @@ int main(int argc, char** argv) {
     declare_param("mapping.extrinsic_est_en",       true,               &extrinsic_est_en);
     declare_param("pcd_save.pcd_save_en",           false,              &pcd_save_en);
     declare_param("pcd_save.interval",              -1,                 &pcd_save_interval);
-    extrinT = declare_param_def("mapping.extrinsic_T", std::vector<double>{});
-    extrinR = declare_param_def("mapping.extrinsic_R", std::vector<double>{});
+    // 默认: 零平移 + 单位旋转, 防止跑空 ros2 run 时 [0..2] / [0..8] 越界 segfault
+    extrinT = declare_param_def("mapping.extrinsic_T", std::vector<double>{0.0, 0.0, 0.0});
+    extrinR = declare_param_def("mapping.extrinsic_R",
+                                std::vector<double>{1.0, 0.0, 0.0,
+                                                    0.0, 1.0, 0.0,
+                                                    0.0, 0.0, 1.0});
     cout << "p_pre->lidar_type " << p_pre->lidar_type << endl;
 
     declare_param("odometrySurfLeafSize",           0.2f, &odometrySurfLeafSize);
@@ -2201,8 +2210,11 @@ int main(int argc, char** argv) {
 
     // gnss
     declare_param("common.gnss_topic",   std::string("/gps/fix"), &gnss_topic);
-    extrinR_Gnss2Lidar = declare_param_def("mapping.extrinR_Gnss2Lidar", std::vector<double>{});
-    extrinT_Gnss2Lidar = declare_param_def("mapping.extrinT_Gnss2Lidar", std::vector<double>{});
+    extrinR_Gnss2Lidar = declare_param_def(
+        "mapping.extrinR_Gnss2Lidar",
+        std::vector<double>{1.0, 0.0, 0.0,  0.0, 1.0, 0.0,  0.0, 0.0, 1.0});
+    extrinT_Gnss2Lidar = declare_param_def(
+        "mapping.extrinT_Gnss2Lidar", std::vector<double>{0.0, 0.0, 0.0});
     declare_param("useImuHeadingInitialization", false, &useImuHeadingInitialization);
     declare_param("useGpsElevation",             false, &useGpsElevation);
     declare_param("gpsCovThreshold",             2.0f,  &gpsCovThreshold);
@@ -2312,21 +2324,13 @@ int main(int argc, char** argv) {
         sub_imu = node->create_subscription<sensor_msgs::msg::Imu>(
             imu_topic, rclcpp::SensorDataQoS().keep_last(200000), imu_cbk);
     } else {
-        // 读取 rosbag 文件 (wrapper/bag_io.cc 走 ROS2 分支)
-        RCLCPP_INFO(rclcpp::get_logger("fastlio_mapping"), "Reading rosbag file: %s", bag_path.c_str());
-        bag_io = RosbagIO(bag_path);
-        bag_io.AddImuHandle(imu_topic, imu_cbk);
-        if (p_pre->lidar_type == LIVOX) {
-            if (p_pre->livox_type == LIVOX_CUS) {
-                bag_io.AddLivoxCloudHandle(lid_topic, livox_pcl_cbk);
-            } else {
-                bag_io.AddPointCloud2Handle(lid_topic, livox_ros_cbk);
-            }
-        } else {
-            bag_io.AddPointCloud2Handle(lid_topic, standard_pcl_cbk);
-        }
-        rosbag_thread = new std::thread([]() { bag_io.Go(0); });
-        rosbag_thread->detach();
+        // ROS2 port: data_mode==1 (内置 RosbagIO) 暂时禁用. 离线回放请用
+        //   ros2 bag play --clock <bag_dir>
+        // + 同时 launch 这个节点 use_sim_time:=true
+        RCLCPP_FATAL(rclcpp::get_logger("fastlio_mapping"),
+                     "data_mode=1 (built-in bag replay) is disabled in the ROS2 port. "
+                     "Use 'ros2 bag play --clock <bag>' alongside this node instead.");
+        return -1;
     }
 
     auto pubLaserCloudFull =
@@ -2600,8 +2604,8 @@ int main(int argc, char** argv) {
         string file_name = string("scans.pcd");
         string all_points_dir(string(string(ROOT_DIR) + "PCD/") + file_name);
         string dir_name = string(ROOT_DIR) + "PCD/";
-        if (!boost::filesystem::exists(dir_name)) {
-            boost::filesystem::create_directories(dir_name);
+        if (!std::filesystem::exists(dir_name)) {
+            std::filesystem::create_directories(dir_name);
         }
         pcl::PCDWriter pcd_writer;
         cout << "current scan saved to " << all_points_dir << endl;
