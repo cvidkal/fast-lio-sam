@@ -86,4 +86,86 @@
 
 ## 进度记录
 
-- 2026-05-03: 阶段 1 完成（脚手架），后续阶段开 PR 时更新此节
+- 2026-05-03: 阶段 1 完成（脚手架）
+- 2026-05-03: 阶段 2 完成 (ament_cmake + rosidl + placeholder, colcon 47s 通过)
+- 2026-05-03: 阶段 3 完成 (preprocess + IMU_Processing + GNSS + common_lib 转 rclcpp)
+
+## 阶段 4 详细拆分 (laserMapping.cpp, 2620 LOC)
+
+为了让 stage 4 的 PR 不变成无法 review 的巨型 diff, 拟分 4 个 sub-commit:
+
+### 4a · sed pass (mechanical, 不可编译)
+全部用 sed/perl 能做的批量替换. 已经在本 worktree 实验过, 共 236 行 diff. 内容:
+- `<ros/ros.h>` → `<rclcpp/rclcpp.hpp>` 等所有 include 重写
+- 所有 `sensor_msgs::Imu`/`PointCloud2`/`NavSatFix`/`nav_msgs::Odometry`/`Path`/`geometry_msgs::Vector3` 等 → `*::msg::*`
+- `livox_ros_driver::CustomMsg` → `livox_ros_driver2::msg::CustomMsg`
+- `ROS_INFO/WARN/ERROR/...` → `RCLCPP_*` (用 `rclcpp::get_logger("fastlio_mapping")`)
+- `ros::Time().fromSec(x)` → `rclcpp::Time(static_cast<int64_t>(x*1e9), RCL_ROS_TIME)`
+- `ros::Time` → `rclcpp::Time`, `ros::Rate` → `rclcpp::Rate`
+- `ros::ok()/shutdown()` → `rclcpp::ok()/shutdown()`
+- `header.stamp.toSec()` → `rclcpp::Time(...).seconds()`
+
+### 4b · 全局 Publisher / Subscriber / Service 类型重写 (manual)
+`ros::Publisher`/`ros::Subscriber`/`ros::ServiceServer` 在 ROS2 都是模板, 必须知道消息类型. 全局变量需要修改:
+
+| 原 (ROS1) | 改成 (ROS2) | 备注 |
+|---|---|---|
+| `ros::Publisher pubX` | `rclcpp::Publisher<T>::SharedPtr pubX` | T 从 `nh.advertise<T>(..)` 推断 |
+| `ros::Subscriber sub` | `rclcpp::Subscription<T>::SharedPtr sub` | T 从回调参数推断 |
+| `ros::ServiceServer srvX` | `rclcpp::Service<T>::SharedPtr srvX` | T 从 srv 文件推断 |
+| `pub.publish(msg)` | `pub->publish(msg)` | 替换 . → -> |
+
+具体每个 publisher 的类型, 见 `nh.advertise<T>` 调用 (在 `main` 里都集中). 大致清单:
+- `pubHistoryKeyFrames`, `pubIcpKeyFrames`, `pubRecentKeyFrames`, `pubRecentKeyFrame`, `pubCloudRegisteredRaw`, `pubLaserCloudSurround`, `pubOptimizedGlobalMap` → `sensor_msgs::msg::PointCloud2`
+- `pubLoopConstraintEdge` → `visualization_msgs::msg::MarkerArray`
+- `pubGnssPath`, `pubPathUpdate` → `nav_msgs::msg::Path`
+- 函数参数 `const ros::Publisher&` → `const rclcpp::Publisher<T>::SharedPtr&` (按调用点的类型确定)
+
+### 4c · main() / NodeHandle / 参数 重写 (manual, 重头戏)
+在 `main()` 里集中改造:
+1. `ros::init(argc, argv, "laserMapping")` + `ros::NodeHandle nh` → `rclcpp::init(argc, argv); auto node = rclcpp::Node::make_shared("laserMapping")`
+2. **每一个 `nh.param<T>("k", v, def)`** → 必须 `node->declare_parameter<T>("k", def);` 然后 `v = node->get_parameter("k").as_<T>()`. 一共 ~40 处. 建议封装成 `template<typename T> T param(rclcpp::Node::SharedPtr&, const std::string&, const T&)` 减少 boilerplate
+3. `nh.advertise<T>("topic", q)` → `node->create_publisher<T>("topic", q)`
+4. `nh.subscribe("topic", q, cb)` → `node->create_subscription<T>("topic", q, cb)`
+5. `nh.advertiseService("name", &fn)` → `node->create_service<T>("name", std::bind(fn, _1, _2))`. **service 回调签名变了**: ROS2 是 `void(const std::shared_ptr<Request>, std::shared_ptr<Response>)`, 不再返回 bool
+6. `ros::spinOnce()` → `rclcpp::spin_some(node)`
+7. `tf::TransformBroadcaster br;` → `tf2_ros::TransformBroadcaster br(node);`
+8. `tf::createQuaternionMsgFromRollPitchYaw(...)` → `tf2::Quaternion q; q.setRPY(...);` 然后 `tf2::toMsg(q)`
+
+### 4d · ikd_Tree + GTSAM + CMakeLists 整合, 试编译
+1. 在 CMakeLists 里:
+   - `find_package(GTSAM REQUIRED)` (apt: `ros-humble-gtsam`)
+   - `add_executable` 加 `src/laserMapping.cpp` + `include/ikd-Tree/ikd_Tree.cpp`
+   - `target_link_libraries` 加 `gtsam`
+   - 把 `wrapper/bag_io.cc` 也编进去 (它已经有 `#ifdef ROS1` 双支持, 只要别 define ROS1 就走 ROS2 分支)
+2. CMakeLists 的依赖也要加: `rosbag2_cpp`, `visualization_msgs`, `tf2_geometry_msgs`
+3. `colcon build` 看错误, 逐个修
+4. **典型错误预测**:
+   - tf2 quaternion 转换的细节差异
+   - `auto& msg = *msg_in` 这种取引用解 `ConstSharedPtr` 的写法可能要改
+   - `pcl::fromROSMsg` 在 ROS2 里 header path 是 `pcl_conversions/pcl_conversions.h` (一致)
+   - GTSAM 的 nav 模块在 Humble 版本可能少了某些 factor, 看运行时报错
+
+## 阶段 5: launch.py
+- `legacy/ros1/launch/mapping_velodyne16.launch` → `launch/mapping_velodyne16.launch.py`
+- `legacy/ros1/launch/mapping_rs.launch` → `launch/mapping_airy.launch.py` (顺便 rename)
+- 用 `Node(package='fast_lio_sam', executable='fastlio_mapping', parameters=[YAML])`
+- RViz config `rviz_cfg/*.rviz` 大概率能直接用 (Display 类型在 ROS2 都向后兼容)
+
+## 阶段 6: 烟测
+- 下载一个 LIO-SAM 公开数据集 bag (`ros2 bag convert` 把 ROS1 .bag 转到 ROS2 sqlite3, 或者拿现成的)
+- `ros2 launch fast_lio_sam mapping_velodyne16.launch.py bag:=<path>`
+- 看是否出 odometry / 地图
+
+## 估时
+
+| 阶段 | 估时 |
+|---|---|
+| 4a (sed) | 已做, 5min |
+| 4b (Pub/Sub/Srv 类型) | 1h |
+| 4c (main/参数/服务回调) | 2-3h |
+| 4d (CMake/编译/调试) | 1-3h, 强烈依赖 GTSAM 编译质量 |
+| 5 (launch.py) | 30min |
+| 6 (烟测) | 1h, 依赖 bag 是否能拿到 |
+
+
