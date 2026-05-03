@@ -37,16 +37,12 @@
   <depend>tf2_geometry_msgs</depend>
   <depend>tf2_eigen</depend>
 
-  <!-- ============ point cloud (引入到 stage 3+, 当前 stage 2 不依赖) ============
+  <!-- ============ point cloud (stage 3 启用) ============ -->
   <depend>pcl_conversions</depend>
   <depend>pcl_ros</depend>
-  <depend>pcl_msgs</depend>
-  <depend>laser_geometry</depend>
-  -->
 
-  <!-- ============ Livox (stage 3+ 引入) ============
+  <!-- ============ Livox (stage 3 启用) ============ -->
   <depend>livox_ros_driver2</depend>
-  -->
 
   <!-- ============ bag I/O (wrapper/bag_io.* 转 ROS2 时启用) ============
   <depend>rosbag2_cpp</depend>

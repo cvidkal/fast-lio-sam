@@ -1,19 +1,20 @@
+// Ported to ROS2 in stage 3/6 (refs #1).
 #include <common_lib.h>
-#include <eigen_conversions/eigen_msg.h>
-#include <geometry_msgs/Vector3.h>
 #include <math.h>
-#include <nav_msgs/Odometry.h>
 #include <pcl/common/io.h>
 #include <pcl/common/transforms.h>
 #include <pcl/kdtree/kdtree_flann.h>
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 #include <pcl_conversions/pcl_conversions.h>
-#include <ros/ros.h>
-#include <sensor_msgs/Imu.h>
-#include <sensor_msgs/PointCloud2.h>
 #include <so3_math.h>
-#include <tf/transform_broadcaster.h>
+
+#include <rclcpp/rclcpp.hpp>
+#include <geometry_msgs/msg/vector3.hpp>
+#include <nav_msgs/msg/odometry.hpp>
+#include <sensor_msgs/msg/imu.hpp>
+#include <sensor_msgs/msg/point_cloud2.hpp>
+#include <tf2_ros/transform_broadcaster.h>
 
 #include <Eigen/Eigen>
 #include <cmath>
@@ -23,6 +24,8 @@
 #include <fstream>
 #include <mutex>
 #include <thread>
+
+#include <cassert>
 
 #include "use-ikfom.hpp"
 
@@ -41,7 +44,7 @@ class ImuProcess {
     ~ImuProcess();
 
     void Reset();
-    void Reset(double start_timestamp, const sensor_msgs::ImuConstPtr& lastimu);
+    void Reset(double start_timestamp, const sensor_msgs::msg::Imu::ConstSharedPtr& lastimu);
     void set_extrinsic(const V3D& transl, const M3D& rot);
     void set_extrinsic(const V3D& transl);
     void set_extrinsic(const MD(4, 4) & T);
@@ -68,8 +71,8 @@ class ImuProcess {
                       PointCloudXYZI& pcl_in_out);
 
     PointCloudXYZI::Ptr cur_pcl_un_;
-    sensor_msgs::ImuConstPtr last_imu_;
-    deque<sensor_msgs::ImuConstPtr> v_imu_;
+    sensor_msgs::msg::Imu::ConstSharedPtr last_imu_;
+    deque<sensor_msgs::msg::Imu::ConstSharedPtr> v_imu_;
     vector<Pose6D> IMUpose;  // //(时间，加速度，角速度，速度，位置，旋转矩阵）
     vector<M3D> v_rot_pcl_;
     M3D Lidar_R_wrt_IMU;
@@ -97,7 +100,7 @@ ImuProcess::ImuProcess() : b_first_frame_(true), imu_need_init_(true), start_tim
     angvel_last = Zero3d;
     Lidar_T_wrt_IMU = Zero3d;
     Lidar_R_wrt_IMU = Eye3d;
-    last_imu_.reset(new sensor_msgs::Imu());
+    last_imu_ = std::make_shared<sensor_msgs::msg::Imu>();
 }
 
 ImuProcess::~ImuProcess() {}
@@ -112,7 +115,7 @@ void ImuProcess::Reset() {
     init_iter_num = 1;
     v_imu_.clear();
     IMUpose.clear();
-    last_imu_.reset(new sensor_msgs::Imu());
+    last_imu_ = std::make_shared<sensor_msgs::msg::Imu>();
     cur_pcl_un_.reset(new PointCloudXYZI());
 }
 
@@ -222,8 +225,8 @@ void ImuProcess::UndistortPcl(const MeasureGroup& meas, esekfom::esekf<state_ikf
     /*** add the imu of the last frame-tail to the of current frame-head ***/
     auto v_imu = meas.imu;                                             // imu数据序列
     v_imu.push_front(last_imu_);                                       // 从头插入上一个imu数据
-    const double& imu_beg_time = v_imu.front()->header.stamp.toSec();  // imu序列起始时间
-    const double& imu_end_time = v_imu.back()->header.stamp.toSec();   // imu序列结束时间
+    const double imu_beg_time = rclcpp::Time(v_imu.front()->header.stamp).seconds();  // imu 序列起始时间
+    const double imu_end_time = rclcpp::Time(v_imu.back()->header.stamp).seconds();   // imu 序列结束时间
     const double& pcl_beg_time = meas.lidar_beg_time;                  // 点云起始时间
     const double& pcl_end_time = meas.lidar_end_time;                  // 点云结束时间
 
@@ -251,7 +254,7 @@ void ImuProcess::UndistortPcl(const MeasureGroup& meas, esekfom::esekf<state_ikf
         auto&& head = *(it_imu);
         auto&& tail = *(it_imu + 1);
 
-        if (tail->header.stamp.toSec() < last_lidar_end_time_) continue;
+        if (rclcpp::Time(tail->header.stamp).seconds() < last_lidar_end_time_) continue;
 
         // 加速度和角速度均值，j与j+1的均值
         angvel_avr << 0.5 * (head->angular_velocity.x + tail->angular_velocity.x),
@@ -261,18 +264,18 @@ void ImuProcess::UndistortPcl(const MeasureGroup& meas, esekfom::esekf<state_ikf
             0.5 * (head->linear_acceleration.y + tail->linear_acceleration.y),
             0.5 * (head->linear_acceleration.z + tail->linear_acceleration.z);
 
-        // fout_imu << setw(10) << head->header.stamp.toSec() - first_lidar_time << " " << angvel_avr.transpose() << " "
+        // fout_imu << setw(10) << rclcpp::Time(head->header.stamp).seconds() - first_lidar_time << " " << angvel_avr.transpose() << " "
         // << acc_avr.transpose() << endl;
 
         // 根据初始化得到的加速度均值，将加速度归算到重力尺度下
         acc_avr = acc_avr * G_m_s2 / mean_acc.norm();  // - state_inout.ba;
 
-        if (head->header.stamp.toSec() < last_lidar_end_time_)  // 前一IMU时间小于上一lidar结束时间
+        if (rclcpp::Time(head->header.stamp).seconds() < last_lidar_end_time_)  // 前一IMU时间小于上一lidar结束时间
         {
-            dt = tail->header.stamp.toSec() - last_lidar_end_time_;  // 记录后一IMU时间与上一lidar结束时间之差
-            // dt = tail->header.stamp.toSec() - pcl_beg_time;
+            dt = rclcpp::Time(tail->header.stamp).seconds() - last_lidar_end_time_;  // 记录后一IMU时间与上一lidar结束时间之差
+            // dt = rclcpp::Time(tail->header.stamp).seconds() - pcl_beg_time;
         } else {
-            dt = tail->header.stamp.toSec() - head->header.stamp.toSec();  // 相邻imu时刻时间差
+            dt = rclcpp::Time(tail->header.stamp).seconds() - rclcpp::Time(head->header.stamp).seconds();  // 相邻imu时刻时间差
         }
 
         // 记录输入量的均值和协方差，记录的是测量值
@@ -292,7 +295,7 @@ void ImuProcess::UndistortPcl(const MeasureGroup& meas, esekfom::esekf<state_ikf
         for (int i = 0; i < 3; i++) {
             acc_s_last[i] += imu_state.grav[i];  // a(world) + g(负值)
         }
-        double&& offs_t = tail->header.stamp.toSec() - pcl_beg_time;  // m+1时刻与lidar起始时刻时间差
+        double&& offs_t = rclcpp::Time(tail->header.stamp).seconds() - pcl_beg_time;  // m+1时刻与lidar起始时刻时间差
         // 保存帧内imu数据 m+1 时刻的pose、前一时刻与当前时刻imu数据的均值（w系）、v、p、r、
         IMUpose.push_back(set_pose6d(offs_t, acc_s_last, angvel_last, imu_state.vel, imu_state.pos,
                                      imu_state.rot.toRotationMatrix()));
@@ -374,7 +377,7 @@ void ImuProcess::Process(const MeasureGroup& meas, esekfom::esekf<state_ikfom, 1
     if (meas.imu.empty()) {
         return;
     };
-    ROS_ASSERT(meas.lidar != nullptr);
+    assert(meas.lidar != nullptr);
 
     // imu 初始化，初始化完成后才做畸变纠正
     if (imu_need_init_) {
@@ -395,7 +398,7 @@ void ImuProcess::Process(const MeasureGroup& meas, esekfom::esekf<state_ikfom, 1
 
             cov_acc = cov_acc_scale;  //??
             cov_gyr = cov_gyr_scale;
-            ROS_INFO("IMU Initial Done");
+            RCLCPP_INFO(rclcpp::get_logger("imu_process"), "IMU Initial Done");
             // ROS_INFO("IMU Initial Done: Gravity: %.4f %.4f %.4f %.4f; state.bias_g: %.4f %.4f %.4f; acc covarience:
             // %.8f %.8f %.8f; gry covarience: %.8f %.8f %.8f",\
             //          imu_state.grav[0], imu_state.grav[1], imu_state.grav[2], mean_acc.norm(), cov_bias_gyr[0],

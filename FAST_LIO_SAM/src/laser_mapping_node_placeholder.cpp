@@ -20,16 +20,25 @@
 #include "fast_lio_sam/srv/save_map.hpp"
 #include "fast_lio_sam/srv/save_pose.hpp"
 
+// stage 3: 把端口好的 preprocess + common_lib + IMU_Processing 实例化一下,
+//          让链接器和编译器都吃到 (验证 header-only 部分也能 parse).
+#include "preprocess.h"
+#include <common_lib.h>
+#include "IMU_Processing.hpp"
+
 
 class FastLioMappingPlaceholder : public rclcpp::Node {
  public:
   FastLioMappingPlaceholder() : rclcpp::Node("fastlio_mapping") {
     RCLCPP_INFO(get_logger(),
-        "fast-lio-sam ROS2 port - stage 2/6 placeholder. "
+        "fast-lio-sam ROS2 port - stage 3/6 placeholder. "
         "See PORTING.md for roadmap.");
     // 验证生成接口确实可实例化
     auto pose = fast_lio_sam::msg::Pose6D{};
     (void)pose;
+    // stage 3: 实例化 Preprocess, 让 ROS2 化的 preprocess.h/cpp 编译 + 链接
+    Preprocess pp;
+    (void)pp;
   }
 };
 
