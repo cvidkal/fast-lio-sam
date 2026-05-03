@@ -113,6 +113,9 @@
 #define MAXN (720000)
 #define PUBFRAME_PERIOD (20)
 
+// ROS2 tf2 broadcaster (在 main() 里用 node 初始化, publish_odometry 中使用).
+std::unique_ptr<tf2_ros::TransformBroadcaster> g_tf_broadcaster;
+
 /*** Time Log Variables ***/
 double kdtree_incremental_time = 0.0, kdtree_search_time = 0.0, kdtree_delete_time = 0.0;
 double T1[MAXN], s_plot[MAXN], s_plot2[MAXN], s_plot3[MAXN], s_plot4[MAXN], s_plot5[MAXN], s_plot6[MAXN], s_plot7[MAXN],
@@ -330,7 +333,8 @@ void updatePath(const PointTypePose& pose_in) {
     pose_stamped.pose.position.x = pose_in.x;
     pose_stamped.pose.position.y = pose_in.y;
     pose_stamped.pose.position.z = pose_in.z;
-    tf::Quaternion q = tf::createQuaternionFromRPY(pose_in.roll, pose_in.pitch, pose_in.yaw);
+    tf2::Quaternion q;
+    q.setRPY(pose_in.roll, pose_in.pitch, pose_in.yaw);
     pose_stamped.pose.orientation.x = q.x();
     pose_stamped.pose.orientation.y = q.y();
     pose_stamped.pose.orientation.z = q.z();
@@ -985,7 +989,7 @@ void performLoopClosure() {
         // if (cureKeyframeCloud->size() < 300 || prevKeyframeCloud->size() < 1000)
         //     return;
         // 发布闭环匹配关键帧局部map
-        if (pubHistoryKeyFrames.getNumSubscribers() != 0)
+        if (pubHistoryKeyFrames->get_subscription_count() != 0)
             publishCloud(pubHistoryKeyFrames, prevKeyframeCloud, timeLaserInfoStamp, odometryFrame);
     }
 
@@ -1009,7 +1013,7 @@ void performLoopClosure() {
     std::cout << "icp  success  " << std::endl;
 
     // 发布当前关键帧经过闭环优化后的位姿变换之后的特征点云
-    if (pubIcpKeyFrames.getNumSubscribers() != 0) {
+    if (pubIcpKeyFrames->get_subscription_count() != 0) {
         pcl::PointCloud<PointType>::Ptr closed_cloud(new pcl::PointCloud<PointType>());
         pcl::transformPointCloud(*cureKeyframeCloud, *closed_cloud, icp.getFinalTransformation());
         publishCloud(pubIcpKeyFrames, closed_cloud, timeLaserInfoStamp, odometryFrame);
@@ -1304,7 +1308,7 @@ void imu_cbk(const sensor_msgs::msg::Imu::ConstSharedPtr& msg_in) {
     mtx_buffer.unlock();
 }
 
-void gnss_cbk(const sensor_msgs::NavSatFixConstPtr& msg_in) {
+void gnss_cbk(const sensor_msgs::msg::NavSatFix::ConstSharedPtr& msg_in) {
     //  RCLCPP_INFO(rclcpp::get_logger("fastlio_mapping"), "GNSS DATA IN ");
     double timestamp = rclcpp::Time(msg_in->header.stamp).seconds();
 
@@ -1612,17 +1616,16 @@ void publish_odometry(const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPt
         odomAftMapped.pose.covariance[i * 6 + 5] = P(k, 2);
     }
 
-    static tf::TransformBroadcaster br;
-    tf::Transform transform;
-    tf::Quaternion q;
-    transform.setOrigin(tf::Vector3(odomAftMapped.pose.pose.position.x, odomAftMapped.pose.pose.position.y,
-                                    odomAftMapped.pose.pose.position.z));
-    q.setW(odomAftMapped.pose.pose.orientation.w);
-    q.setX(odomAftMapped.pose.pose.orientation.x);
-    q.setY(odomAftMapped.pose.pose.orientation.y);
-    q.setZ(odomAftMapped.pose.pose.orientation.z);
-    transform.setRotation(q);
-    br.sendTransform(tf::StampedTransform(transform, odomAftMapped.header.stamp, "camera_init", "body"));
+    // ROS2 tf2 broadcaster: g_tf_broadcaster 是全局, 在 main() 里用 node 初始化
+    geometry_msgs::msg::TransformStamped tfs;
+    tfs.header = odomAftMapped.header;
+    tfs.header.frame_id = "camera_init";
+    tfs.child_frame_id = "body";
+    tfs.transform.translation.x = odomAftMapped.pose.pose.position.x;
+    tfs.transform.translation.y = odomAftMapped.pose.pose.position.y;
+    tfs.transform.translation.z = odomAftMapped.pose.pose.position.z;
+    tfs.transform.rotation = odomAftMapped.pose.pose.orientation;
+    if (g_tf_broadcaster) g_tf_broadcaster->sendTransform(tfs);
 }
 
 void publish_path(const rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr& pubPath) {
@@ -1653,7 +1656,7 @@ void publish_path(const rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr& pubPa
 void publish_path_update(const rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr& pubPath) {
     rclcpp::Time timeLaserInfoStamp = rclcpp::Time(static_cast<int64_t>((lidar_end_time) * 1e9), RCL_ROS_TIME);  //  时间戳
     string odometryFrame = "camera_init";
-    if (pubPath.getNumSubscribers() != 0) {
+    if (pubPath->get_subscription_count() != 0) {
         /*** if path is too large, the rvis will crash ***/
         static int kkk = 0;
         kkk++;
@@ -1700,7 +1703,7 @@ void WriteText(std::ofstream& ofs, pose data) {
         << data.R(2, 1) << " " << data.R(2, 2) << " " << data.t[2] << std::endl;
 }
 
-bool savePoseService(fast_lio_sam::save_poseRequest& req, fast_lio_sam::save_poseResponse& res) {
+void savePoseService(const std::shared_ptr<fast_lio_sam::srv::SavePose::Request> req, std::shared_ptr<fast_lio_sam::srv::SavePose::Response> res) {
     pose pose_gnss;
     pose pose_optimized;
     pose pose_without_optimized;
@@ -1712,9 +1715,9 @@ bool savePoseService(fast_lio_sam::save_poseRequest& req, fast_lio_sam::save_pos
     string savePoseDirectory;
     cout << "****************************************************" << endl;
     cout << "Saving poses to pose files ..." << endl;
-    if (req.destination.empty()) savePoseDirectory = std::getenv("HOME") + savePCDDirectory;
+    if (req->destination.empty()) savePoseDirectory = std::getenv("HOME") + savePCDDirectory;
     else
-        savePoseDirectory = std::getenv("HOME") + req.destination;
+        savePoseDirectory = std::getenv("HOME") + req->destination;
     cout << "Save destination: " << savePoseDirectory << endl;
 
     // create file
@@ -1755,7 +1758,7 @@ bool savePoseService(fast_lio_sam::save_poseRequest& req, fast_lio_sam::save_pos
     file_pose_gnss.close();
     file_pose_optimized.close();
     file_pose_without_optimized.close();
-    return true;
+    res->success = true;
 }
 
 /**
@@ -1816,14 +1819,14 @@ void outputHBA(const vector<pcl::PointCloud<PointType>::Ptr>& surfCloudKeyFrames
 /**
  * 保存全局关键帧特征点集合
  */
-bool saveMapService(fast_lio_sam::save_mapRequest& req, fast_lio_sam::save_mapResponse& res) {
+void saveMapService(const std::shared_ptr<fast_lio_sam::srv::SaveMap::Request> req, std::shared_ptr<fast_lio_sam::srv::SaveMap::Response> res) {
     string saveMapDirectory;
 
     cout << "****************************************************" << endl;
     cout << "Saving map to pcd files ..." << endl;
-    if (req.destination.empty()) saveMapDirectory = std::getenv("HOME") + savePCDDirectory;
+    if (req->destination.empty()) saveMapDirectory = std::getenv("HOME") + savePCDDirectory;
     else
-        saveMapDirectory = std::getenv("HOME") + req.destination;
+        saveMapDirectory = std::getenv("HOME") + req->destination;
     cout << "Save destination: " << saveMapDirectory << endl;
     // 这个代码太坑了！！注释掉
     //   int unused = system((std::string("exec rm -r ") + saveMapDirectory).c_str());
@@ -1846,17 +1849,17 @@ bool saveMapService(fast_lio_sam::save_mapRequest& req, fast_lio_sam::save_mapRe
         cout << "\r" << std::flush << "Processing feature cloud " << i << " of " << cloudKeyPoses6D->size() << " ...";
     }
 
-    if (req.resolution != 0) {
-        cout << "\n\nSave resolution: " << req.resolution << endl;
+    if (req->resolution != 0) {
+        cout << "\n\nSave resolution: " << req->resolution << endl;
 
         // 降采样
         // downSizeFilterCorner.setInputCloud(globalCornerCloud);
-        // downSizeFilterCorner.setLeafSize(req.resolution, req.resolution, req.resolution);
+        // downSizeFilterCorner.setLeafSize(req->resolution, req->resolution, req->resolution);
         // downSizeFilterCorner.filter(*globalCornerCloudDS);
         // pcl::io::savePCDFileBinary(saveMapDirectory + "/CornerMap.pcd", *globalCornerCloudDS);
         // 降采样
         downSizeFilterSurf.setInputCloud(globalSurfCloud);
-        downSizeFilterSurf.setLeafSize(req.resolution, req.resolution, req.resolution);
+        downSizeFilterSurf.setLeafSize(req->resolution, req->resolution, req->resolution);
         downSizeFilterSurf.filter(*globalSurfCloudDS);
         pcl::io::savePCDFileBinary(saveMapDirectory + "/SurfMap.pcd", *globalSurfCloudDS);
     } else {
@@ -1873,7 +1876,7 @@ bool saveMapService(fast_lio_sam::save_mapRequest& req, fast_lio_sam::save_mapRe
     *globalMapCloud += *globalSurfCloud;
     pcl::io::savePCDFileBinary(saveMapDirectory + "/filterGlobalMap.pcd", *globalSurfCloudDS);   //  滤波后地图
     int ret = pcl::io::savePCDFileBinary(saveMapDirectory + "/GlobalMap.pcd", *globalMapCloud);  //  稠密地图
-    res.success = ret == 0;
+    res->success = ret == 0;
 
     cout << "****************************************************" << endl;
     cout << "Saving map to pcd files completed\n" << endl;
@@ -1886,14 +1889,14 @@ bool saveMapService(fast_lio_sam::save_mapRequest& req, fast_lio_sam::save_mapRe
     // 输出HBA格式的数据
     outputHBA(surfCloudKeyFrames, cloudKeyPoses6D, saveMapDirectory);
 
-    return true;
+    // res->success 已经在 ret==0 处赋好, 这里 void 收尾
 }
 
 void saveMap() {
-    fast_lio_sam::save_mapRequest req;
-    fast_lio_sam::save_mapResponse res;
-    // 保存全局关键帧特征点集合
-    if (!saveMapService(req, res)) {
+    auto req = std::make_shared<fast_lio_sam::srv::SaveMap::Request>();
+    auto res = std::make_shared<fast_lio_sam::srv::SaveMap::Response>();
+    saveMapService(req, res);
+    if (!res->success) {
         cout << "Fail to save map" << endl;
     }
 }
@@ -1905,7 +1908,7 @@ void publishGlobalMap() {
     /*** if path is too large, the rvis will crash ***/
     rclcpp::Time timeLaserInfoStamp = rclcpp::Time(static_cast<int64_t>((lidar_end_time) * 1e9), RCL_ROS_TIME);
     string odometryFrame = "camera_init";
-    if (pubLaserCloudSurround.getNumSubscribers() == 0) return;
+    if (pubLaserCloudSurround->get_subscription_count() == 0) return;
 
     if (cloudKeyPoses3D->points.empty() == true) return;
     pcl::KdTreeFLANN<PointType>::Ptr kdtreeGlobalMap(new pcl::KdTreeFLANN<PointType>());
@@ -2119,93 +2122,106 @@ int main(int argc, char** argv) {
         transformTobeMapped[i] = 0;
     }
 
-    ros::init(argc, argv, "laserMapping");
-    ros::NodeHandle nh;
+    rclcpp::init(argc, argv);
+    auto node = std::make_shared<rclcpp::Node>("laserMapping");
+    g_tf_broadcaster = std::make_unique<tf2_ros::TransformBroadcaster>(node);
 
-    nh.param<bool>("publish/path_en", path_en, true);
-    nh.param<bool>("publish/scan_publish_en", scan_pub_en, true);
-    nh.param<bool>("publish/dense_publish_en", dense_pub_en, true);
-    nh.param<bool>("publish/scan_bodyframe_pub_en", scan_body_pub_en, true);
-    nh.param<int>("max_iteration", NUM_MAX_ITERATIONS, 4);
-    nh.param<string>("map_file_path", map_file_path, "");
-    nh.param<string>("common/lid_topic", lid_topic, "/livox/lidar");
-    nh.param<string>("common/imu_topic", imu_topic, "/livox/imu");
-    nh.param<bool>("common/time_sync_en", time_sync_en, false);
-    nh.param<int>("common/data_mode", data_mode, 0);
-    nh.param<string>("common/bag_path", bag_path, "");
-    nh.param<double>("filter_size_corner", filter_size_corner_min, 0.5);
-    nh.param<double>("filter_size_surf", filter_size_surf_min, 0.5);
-    nh.param<double>("filter_size_map", filter_size_map_min, 0.5);
-    nh.param<double>("cube_side_length", cube_len, 200);
-    nh.param<float>("mapping/det_range", DET_RANGE, 300.f);
-    nh.param<double>("mapping/fov_degree", fov_deg, 180);
-    nh.param<double>("mapping/gyr_cov", gyr_cov, 0.1);
-    nh.param<double>("mapping/acc_cov", acc_cov, 0.1);
-    nh.param<double>("mapping/b_gyr_cov", b_gyr_cov, 0.0001);
-    nh.param<double>("mapping/b_acc_cov", b_acc_cov, 0.0001);
-    nh.param<double>("preprocess/blind", p_pre->blind, 0.01);
-    nh.param<int>("preprocess/lidar_type", p_pre->lidar_type, LIVOX);
-    nh.param<int>("preprocess/livox_type", p_pre->livox_type, LIVOX_CUS);
-    nh.param<int>("preprocess/scan_line", p_pre->N_SCANS, 16);
-    nh.param<int>("preprocess/scan_rate", p_pre->SCAN_RATE, 10);
-    nh.param<int>("point_filter_num", p_pre->point_filter_num, 2);
-    nh.param<bool>("feature_extract_enable", p_pre->feature_enabled, false);
-    nh.param<bool>("runtime_pos_log_enable", runtime_pos_log, 0);
-    nh.param<bool>("mapping/extrinsic_est_en", extrinsic_est_en, true);
-    nh.param<bool>("pcd_save/pcd_save_en", pcd_save_en, false);
-    nh.param<int>("pcd_save/interval", pcd_save_interval, -1);
-    nh.param<vector<double>>("mapping/extrinsic_T", extrinT, vector<double>());
-    nh.param<vector<double>>("mapping/extrinsic_R", extrinR, vector<double>());
+    // ROS2 参数声明 + 读取小帮手
+    auto declare_param = [&node](auto && name, auto && def, auto * dst) {
+        using T = std::decay_t<decltype(def)>;
+        node->declare_parameter<T>(name, def);
+        node->get_parameter(name, *dst);
+    };
+    auto declare_param_def = [&node](auto && name, auto && def) {
+        using T = std::decay_t<decltype(def)>;
+        node->declare_parameter<T>(name, def);
+        return node->get_parameter(name).get_value<T>();
+    };
+
+    declare_param("publish.path_en",                path_en,            &path_en);
+    declare_param("publish.scan_publish_en",        scan_pub_en,        &scan_pub_en);
+    declare_param("publish.dense_publish_en",       dense_pub_en,       &dense_pub_en);
+    declare_param("publish.scan_bodyframe_pub_en",  scan_body_pub_en,   &scan_body_pub_en);
+    declare_param("max_iteration",                  4,                  &NUM_MAX_ITERATIONS);
+    declare_param("map_file_path",                  std::string(""),    &map_file_path);
+    declare_param("common.lid_topic",               std::string("/livox/lidar"), &lid_topic);
+    declare_param("common.imu_topic",               std::string("/livox/imu"),   &imu_topic);
+    declare_param("common.time_sync_en",            false,              &time_sync_en);
+    declare_param("common.data_mode",               0,                  &data_mode);
+    declare_param("common.bag_path",                std::string(""),    &bag_path);
+    declare_param("filter_size_corner",             0.5,                &filter_size_corner_min);
+    declare_param("filter_size_surf",               0.5,                &filter_size_surf_min);
+    declare_param("filter_size_map",                0.5,                &filter_size_map_min);
+    declare_param("cube_side_length",               200.0,              &cube_len);
+    declare_param("mapping.det_range",              300.0f,             &DET_RANGE);
+    declare_param("mapping.fov_degree",             180.0,              &fov_deg);
+    declare_param("mapping.gyr_cov",                0.1,                &gyr_cov);
+    declare_param("mapping.acc_cov",                0.1,                &acc_cov);
+    declare_param("mapping.b_gyr_cov",              0.0001,             &b_gyr_cov);
+    declare_param("mapping.b_acc_cov",              0.0001,             &b_acc_cov);
+    declare_param("preprocess.blind",               0.01,               &p_pre->blind);
+    declare_param("preprocess.lidar_type",          int(LIVOX),         &p_pre->lidar_type);
+    declare_param("preprocess.livox_type",          int(LIVOX_CUS),     &p_pre->livox_type);
+    declare_param("preprocess.scan_line",           16,                 &p_pre->N_SCANS);
+    declare_param("preprocess.scan_rate",           10,                 &p_pre->SCAN_RATE);
+    declare_param("point_filter_num",               2,                  &p_pre->point_filter_num);
+    declare_param("feature_extract_enable",         false,              &p_pre->feature_enabled);
+    declare_param("runtime_pos_log_enable",         false,              &runtime_pos_log);
+    declare_param("mapping.extrinsic_est_en",       true,               &extrinsic_est_en);
+    declare_param("pcd_save.pcd_save_en",           false,              &pcd_save_en);
+    declare_param("pcd_save.interval",              -1,                 &pcd_save_interval);
+    extrinT = declare_param_def("mapping.extrinsic_T", std::vector<double>{});
+    extrinR = declare_param_def("mapping.extrinsic_R", std::vector<double>{});
     cout << "p_pre->lidar_type " << p_pre->lidar_type << endl;
 
-    nh.param<float>("odometrySurfLeafSize", odometrySurfLeafSize, 0.2);
-    nh.param<float>("mappingCornerLeafSize", mappingCornerLeafSize, 0.2);
-    nh.param<float>("mappingSurfLeafSize", mappingSurfLeafSize, 0.2);
+    declare_param("odometrySurfLeafSize",           0.2f, &odometrySurfLeafSize);
+    declare_param("mappingCornerLeafSize",          0.2f, &mappingCornerLeafSize);
+    declare_param("mappingSurfLeafSize",            0.2f, &mappingSurfLeafSize);
 
-    nh.param<float>("z_tollerance", z_tollerance, FLT_MAX);
-    nh.param<float>("rotation_tollerance", rotation_tollerance, FLT_MAX);
+    declare_param("z_tollerance",                   FLT_MAX, &z_tollerance);
+    declare_param("rotation_tollerance",            FLT_MAX, &rotation_tollerance);
 
-    nh.param<int>("numberOfCores", numberOfCores, 2);
-    nh.param<double>("mappingProcessInterval", mappingProcessInterval, 0.15);
+    declare_param("numberOfCores",                  2, &numberOfCores);
+    declare_param("mappingProcessInterval",         0.15, &mappingProcessInterval);
 
     // save keyframes
-    nh.param<float>("surroundingkeyframeAddingDistThreshold", surroundingkeyframeAddingDistThreshold, 20.0);
-    nh.param<float>("surroundingkeyframeAddingAngleThreshold", surroundingkeyframeAddingAngleThreshold, 0.2);
-    nh.param<float>("surroundingKeyframeDensity", surroundingKeyframeDensity, 1.0);
-    nh.param<float>("surroundingKeyframeSearchRadius", surroundingKeyframeSearchRadius, 50.0);
+    declare_param("surroundingkeyframeAddingDistThreshold",  20.0f, &surroundingkeyframeAddingDistThreshold);
+    declare_param("surroundingkeyframeAddingAngleThreshold", 0.2f,  &surroundingkeyframeAddingAngleThreshold);
+    declare_param("surroundingKeyframeDensity",              1.0f,  &surroundingKeyframeDensity);
+    declare_param("surroundingKeyframeSearchRadius",         50.0f, &surroundingKeyframeSearchRadius);
 
-    // loop clousre
-    nh.param<bool>("loopClosureEnableFlag", loopClosureEnableFlag, false);
-    nh.param<float>("loopClosureFrequency", loopClosureFrequency, 1.0);
-    nh.param<int>("surroundingKeyframeSize", surroundingKeyframeSize, 50);
-    nh.param<float>("historyKeyframeSearchRadius", historyKeyframeSearchRadius, 10.0);
-    nh.param<float>("historyKeyframeSearchTimeDiff", historyKeyframeSearchTimeDiff, 30.0);
-    nh.param<int>("historyKeyframeSearchNum", historyKeyframeSearchNum, 25);
-    nh.param<float>("historyKeyframeFitnessScore", historyKeyframeFitnessScore, 0.3);
+    // loop closure
+    declare_param("loopClosureEnableFlag",          false, &loopClosureEnableFlag);
+    declare_param("loopClosureFrequency",           1.0f,  &loopClosureFrequency);
+    declare_param("surroundingKeyframeSize",        50,    &surroundingKeyframeSize);
+    declare_param("historyKeyframeSearchRadius",    10.0f, &historyKeyframeSearchRadius);
+    declare_param("historyKeyframeSearchTimeDiff",  30.0f, &historyKeyframeSearchTimeDiff);
+    declare_param("historyKeyframeSearchNum",       25,    &historyKeyframeSearchNum);
+    declare_param("historyKeyframeFitnessScore",    0.3f,  &historyKeyframeFitnessScore);
 
     // gnss
-    nh.param<string>("common/gnss_topic", gnss_topic, "/gps/fix");
-    nh.param<vector<double>>("mapping/extrinR_Gnss2Lidar", extrinR_Gnss2Lidar, vector<double>());
-    nh.param<vector<double>>("mapping/extrinT_Gnss2Lidar", extrinT_Gnss2Lidar, vector<double>());
-    nh.param<bool>("useImuHeadingInitialization", useImuHeadingInitialization, false);
-    nh.param<bool>("useGpsElevation", useGpsElevation, false);
-    nh.param<float>("gpsCovThreshold", gpsCovThreshold, 2.0);
-    nh.param<float>("poseCovThreshold", poseCovThreshold, 25.0);
+    declare_param("common.gnss_topic",   std::string("/gps/fix"), &gnss_topic);
+    extrinR_Gnss2Lidar = declare_param_def("mapping.extrinR_Gnss2Lidar", std::vector<double>{});
+    extrinT_Gnss2Lidar = declare_param_def("mapping.extrinT_Gnss2Lidar", std::vector<double>{});
+    declare_param("useImuHeadingInitialization", false, &useImuHeadingInitialization);
+    declare_param("useGpsElevation",             false, &useGpsElevation);
+    declare_param("gpsCovThreshold",             2.0f,  &gpsCovThreshold);
+    declare_param("poseCovThreshold",            25.0f, &poseCovThreshold);
 
     // Visualization
-    nh.param<float>("globalMapVisualizationSearchRadius", globalMapVisualizationSearchRadius, 1e3);
-    nh.param<float>("globalMapVisualizationPoseDensity", globalMapVisualizationPoseDensity, 10.0);
-    nh.param<float>("globalMapVisualizationLeafSize", globalMapVisualizationLeafSize, 1.0);
+    declare_param("globalMapVisualizationSearchRadius",  1e3f,  &globalMapVisualizationSearchRadius);
+    declare_param("globalMapVisualizationPoseDensity",   10.0f, &globalMapVisualizationPoseDensity);
+    declare_param("globalMapVisualizationLeafSize",      1.0f,  &globalMapVisualizationLeafSize);
 
     // visual ikdtree map
-    nh.param<bool>("visulize_IkdtreeMap", visulize_IkdtreeMap, false);
+    declare_param("visulize_IkdtreeMap", false, &visulize_IkdtreeMap);
 
     // reconstruct ikdtree
-    nh.param<bool>("recontructKdTree", recontructKdTree, false);
+    declare_param("recontructKdTree", false, &recontructKdTree);
 
     // savMap
-    nh.param<bool>("savePCD", savePCD, false);
-    nh.param<std::string>("savePCDDirectory", savePCDDirectory, "/Downloads/LOAM/");
+    declare_param("savePCD",          false,                              &savePCD);
+    declare_param("savePCDDirectory", std::string("/Downloads/LOAM/"),    &savePCDDirectory);
 
     downSizeFilterCorner.setLeafSize(mappingCornerLeafSize, mappingCornerLeafSize, mappingCornerLeafSize);
     // downSizeFilterSurf.setLeafSize(mappingSurfLeafSize, mappingSurfLeafSize, mappingSurfLeafSize);
@@ -2220,7 +2236,7 @@ int main(int argc, char** argv) {
     parameters.relinearizeSkip = 1;
     isam = new gtsam::ISAM2(parameters);
 
-    path.header.stamp = rclcpp::Time::now();
+    path.header.stamp = node->now();
     path.header.frame_id = "camera_init";
 
     /*** variables definition ***/
@@ -2276,71 +2292,77 @@ int main(int argc, char** argv) {
     }
 
     /*** ROS subscribe initialization ***/
-
-    ros::Subscriber sub_pcl, sub_imu;
+    rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_pcl_pc;
+    rclcpp::Subscription<livox_ros_driver2::msg::CustomMsg>::SharedPtr sub_pcl_livox;
+    rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr sub_imu;
 
     if (data_mode != 1) {
-        sub_pcl = p_pre->lidar_type == LIVOX
-                      ? (p_pre->livox_type == LIVOX_CUS ? nh.subscribe(lid_topic, 200000, livox_pcl_cbk)
-                                                        : nh.subscribe(lid_topic, 200000, livox_ros_cbk))
-                      : nh.subscribe(lid_topic, 200000, standard_pcl_cbk);
-        sub_imu = nh.subscribe(imu_topic, 200000, imu_cbk);
+        if (p_pre->lidar_type == LIVOX) {
+            if (p_pre->livox_type == LIVOX_CUS) {
+                sub_pcl_livox = node->create_subscription<livox_ros_driver2::msg::CustomMsg>(
+                    lid_topic, rclcpp::SensorDataQoS().keep_last(200000), livox_pcl_cbk);
+            } else {
+                sub_pcl_pc = node->create_subscription<sensor_msgs::msg::PointCloud2>(
+                    lid_topic, rclcpp::SensorDataQoS().keep_last(200000), livox_ros_cbk);
+            }
+        } else {
+            sub_pcl_pc = node->create_subscription<sensor_msgs::msg::PointCloud2>(
+                lid_topic, rclcpp::SensorDataQoS().keep_last(200000), standard_pcl_cbk);
+        }
+        sub_imu = node->create_subscription<sensor_msgs::msg::Imu>(
+            imu_topic, rclcpp::SensorDataQoS().keep_last(200000), imu_cbk);
     } else {
-        // 读取rosbag文件
+        // 读取 rosbag 文件 (wrapper/bag_io.cc 走 ROS2 分支)
         RCLCPP_INFO(rclcpp::get_logger("fastlio_mapping"), "Reading rosbag file: %s", bag_path.c_str());
         bag_io = RosbagIO(bag_path);
         bag_io.AddImuHandle(imu_topic, imu_cbk);
         if (p_pre->lidar_type == LIVOX) {
             if (p_pre->livox_type == LIVOX_CUS) {
-                bag_io.AddLivoxCloudHandle(lid_topic ,livox_pcl_cbk);
+                bag_io.AddLivoxCloudHandle(lid_topic, livox_pcl_cbk);
             } else {
                 bag_io.AddPointCloud2Handle(lid_topic, livox_ros_cbk);
             }
         } else {
             bag_io.AddPointCloud2Handle(lid_topic, standard_pcl_cbk);
-            
         }
-        rosbag_thread = new std::thread([]() { bag_io.Go(0); }); 
+        rosbag_thread = new std::thread([]() { bag_io.Go(0); });
         rosbag_thread->detach();
     }
 
+    auto pubLaserCloudFull =
+        node->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered", 100000);
+    auto pubLaserCloudFull_body =
+        node->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered_body", 100000);
+    auto pubLaserCloudEffect =
+        node->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_effected", 100000);    // no used
+    auto pubLaserCloudMap =
+        node->create_publisher<sensor_msgs::msg::PointCloud2>("/Laser_map", 100000);         // no used
+    auto pubOdomAftMapped = node->create_publisher<nav_msgs::msg::Odometry>("/Odometry", 100000);
+    auto pubPath          = node->create_publisher<nav_msgs::msg::Path>("/path", 100000);
+    auto pubPathUpdate    = node->create_publisher<nav_msgs::msg::Path>("fast_lio_sam/path_update", 100000);
 
-    ros::Publisher pubLaserCloudFull =
-        nh.advertise<sensor_msgs::msg::PointCloud2>("/cloud_registered", 100000);  //  world系下稠密点云
-    ros::Publisher pubLaserCloudFull_body =
-        nh.advertise<sensor_msgs::msg::PointCloud2>("/cloud_registered_body", 100000);  //  body系下稠密点云
-    ros::Publisher pubLaserCloudEffect = nh.advertise<sensor_msgs::msg::PointCloud2>("/cloud_effected", 100000);  //  no used
-    ros::Publisher pubLaserCloudMap = nh.advertise<sensor_msgs::msg::PointCloud2>("/Laser_map", 100000);          //  no used
-    ros::Publisher pubOdomAftMapped = nh.advertise<nav_msgs::msg::Odometry>("/Odometry", 100000);
-    ros::Publisher pubPath = nh.advertise<nav_msgs::msg::Path>("/path", 1e00000);
+    pubGnssPath           = node->create_publisher<nav_msgs::msg::Path>("/gnss_path", 100000);
+    pubLaserCloudSurround = node->create_publisher<sensor_msgs::msg::PointCloud2>(
+        "fast_lio_sam/mapping/keyframe_submap", 1);
+    pubOptimizedGlobalMap = node->create_publisher<sensor_msgs::msg::PointCloud2>(
+        "fast_lio_sam/mapping/map_global_optimized", 1);
 
-    ros::Publisher pubPathUpdate =
-        nh.advertise<nav_msgs::msg::Path>("fast_lio_sam/path_update", 100000);  //  isam更新后的path
-    pubGnssPath = nh.advertise<nav_msgs::msg::Path>("/gnss_path", 100000);
-    pubLaserCloudSurround = nh.advertise<sensor_msgs::msg::PointCloud2>("fast_lio_sam/mapping/keyframe_submap",
-                                                                   1);  // 发布局部关键帧map的特征点云
-    pubOptimizedGlobalMap = nh.advertise<sensor_msgs::msg::PointCloud2>("fast_lio_sam/mapping/map_global_optimized",
-                                                                   1);  // 发布局部关键帧map的特征点云
-
-    // loop clousre
-    // 发布闭环匹配关键帧局部map
-    pubHistoryKeyFrames =
-        nh.advertise<sensor_msgs::msg::PointCloud2>("fast_lio_sam/mapping/icp_loop_closure_history_cloud", 1);
-    // 发布当前关键帧经过闭环优化后的位姿变换之后的特征点云
-    pubIcpKeyFrames =
-        nh.advertise<sensor_msgs::msg::PointCloud2>("fast_lio_sam/mapping/icp_loop_closure_corrected_cloud", 1);
-    // 发布闭环边，rviz中表现为闭环帧之间的连线
-    pubLoopConstraintEdge =
-        nh.advertise<visualization_msgs::msg::MarkerArray>("/fast_lio_sam/mapping/loop_closure_constraints", 1);
+    // loop closure
+    pubHistoryKeyFrames = node->create_publisher<sensor_msgs::msg::PointCloud2>(
+        "fast_lio_sam/mapping/icp_loop_closure_history_cloud", 1);
+    pubIcpKeyFrames = node->create_publisher<sensor_msgs::msg::PointCloud2>(
+        "fast_lio_sam/mapping/icp_loop_closure_corrected_cloud", 1);
+    pubLoopConstraintEdge = node->create_publisher<visualization_msgs::msg::MarkerArray>(
+        "/fast_lio_sam/mapping/loop_closure_constraints", 1);
 
     // gnss
-    ros::Subscriber sub_gnss = nh.subscribe(gnss_topic, 200000, gnss_cbk);
+    auto sub_gnss = node->create_subscription<sensor_msgs::msg::NavSatFix>(
+        gnss_topic, rclcpp::SensorDataQoS().keep_last(200000), gnss_cbk);
 
-    // saveMap  发布地图保存服务
-    srvSaveMap = nh.advertiseService("/save_map", &saveMapService);
-
-    // savePose  发布轨迹保存服务
-    srvSavePose = nh.advertiseService("/save_pose", &savePoseService);
+    // saveMap
+    srvSaveMap  = node->create_service<fast_lio_sam::srv::SaveMap>("/save_map", &saveMapService);
+    // savePose
+    srvSavePose = node->create_service<fast_lio_sam::srv::SavePose>("/save_pose", &savePoseService);
 
     // 回环检测线程
     std::thread loopthread(&loopClosureThread);
@@ -2351,7 +2373,7 @@ int main(int argc, char** argv) {
     bool status = rclcpp::ok();
     while (status) {
         if (flg_exit) break;
-        ros::spinOnce();
+        rclcpp::spin_some(node);
 
         if (data_mode == 1) {
             // 等待sig_buffer通知
