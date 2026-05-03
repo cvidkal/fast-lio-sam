@@ -1,90 +1,100 @@
-common:
-    lid_topic:  "/velodyne_points"
-    imu_topic:  "/imu/data"
+# ROS2 port of legacy/ros1/config/velodyne16.yaml.
+# 用法: ros2 launch fast_lio_sam mapping_velodyne16.launch.py
+#
+# ROS2 参数 YAML 必须用 /**:\n  ros__parameters:\n 包一层. 嵌套点 (.) 在
+# laserMapping.cpp 里 declare_parameter 时拆成嵌套 key, 见 main() 顶部.
+/**:
+  ros__parameters:
+    publish:
+      path_en: true
+      scan_publish_en: true
+      dense_publish_en: true
+      scan_bodyframe_pub_en: true
 
-#NCLT
-#    lid_topic: "/points_raw"
-#    imu_topic: "/imu_raw"
+    common:
+      lid_topic: "/velodyne_points"
+      imu_topic: "/imu/data"
+      time_sync_en: false
+      data_mode: 0           # 0=live ROS topic; 1=已废弃, 离线回放用 ros2 bag play
+      bag_path: ""
+      gnss_topic: "/gps/fix"
 
-#KITTI
-#    lid_topic: "/kitti/velo/pointcloud"
-#    imu_topic: "/kitti/oxts/imu"
+    preprocess:
+      blind: 1.0
+      lidar_type: 2          # 1 Livox / 2 Velodyne / 3 Ouster / 4 Robosense (issue #2)
+      scan_line: 16
+      scan_rate: 10
+      livox_type: 1
 
-#RS LiDar
-#    lid_topic: "/rslidar"
-#    imu_topic: "/imu"
-    time_sync_en: false         # ONLY turn on when external time synchronization is really not possible
-    
-preprocess:
-    lidar_type: 2                # 1 for Livox serials LiDAR, 2 for Velodyne LiDAR, 3 for ouster LiDAR, 
-    scan_line: 16
-    scan_rate: 10                # only need to be set for velodyne, unit: Hz,
-    blind: 1
+    mapping:
+      acc_cov: 0.1
+      gyr_cov: 0.1
+      b_acc_cov: 0.0001
+      b_gyr_cov: 0.0001
+      fov_degree: 180.0
+      det_range: 100.0
+      extrinsic_est_en: true
+      extrinsic_T: [0.0, 0.0, 0.28]
+      extrinsic_R: [1.0, 0.0, 0.0,
+                    0.0, 1.0, 0.0,
+                    0.0, 0.0, 1.0]
+      extrinT_Gnss2Lidar: [0.0, 0.0, 0.0]
+      extrinR_Gnss2Lidar: [1.0, 0.0, 0.0,
+                           0.0, 1.0, 0.0,
+                           0.0, 0.0, 1.0]
 
-mapping:
-    acc_cov: 0.1
-    gyr_cov: 0.1
-    b_acc_cov: 0.0001
-    b_gyr_cov: 0.0001
-    fov_degree:    180
-    det_range:     100.0
-    extrinsic_est_en:  true      # true: enable the online estimation of IMU-LiDAR extrinsic,
-    extrinsic_T: [ 0, 0, 0.28]
-    extrinsic_R: [ 1, 0, 0, 
-                   0, 1, 0, 
-                   0, 0, 1]
+    pcd_save:
+      pcd_save_en: true
+      interval: -1
 
-publish:
-    path_en:  true
-    scan_publish_en:  true       # false: close all the point cloud output
-    dense_publish_en: true       # false: low down the points number in a global-frame point clouds scan.
-    scan_bodyframe_pub_en: true  # true: output the point cloud scans in IMU-body-frame
+    feature_extract_enable: false
+    point_filter_num: 4
+    max_iteration: 4
+    filter_size_corner: 0.5
+    filter_size_surf: 0.5
+    filter_size_map: 0.5
+    cube_side_length: 1000.0
+    runtime_pos_log_enable: false
+    map_file_path: ""
 
-pcd_save:
-    pcd_save_en: true
-    interval: -1                 # how many LiDAR frames saved in each pcd file; 
-                                 # -1 : all frames will be saved in ONE pcd file, may lead to memory crash when having too much frames.
+    # voxel filter
+    odometrySurfLeafSize: 0.4
+    mappingCornerLeafSize: 0.2
+    mappingSurfLeafSize: 0.4
+    z_tollerance: 1000.0
+    rotation_tollerance: 1000.0
 
-# voxel filter paprams
-odometrySurfLeafSize: 0.4                     # default: 0.4 - outdoor, 0.2 - indoor
-mappingCornerLeafSize: 0.2                    # default: 0.2 - outdoor, 0.1 - indoor
-mappingSurfLeafSize: 0.4                      # default: 0.4 - outdoor, 0.2 - indoor
+    numberOfCores: 4
+    mappingProcessInterval: 0.15
 
-# robot motion constraint (in case you are using a 2D robot)
-z_tollerance: 1000                            # meters
-rotation_tollerance: 1000                     # radians
+    # save keyframes
+    surroundingkeyframeAddingDistThreshold: 1.0
+    surroundingkeyframeAddingAngleThreshold: 0.2
+    surroundingKeyframeDensity: 2.0
+    surroundingKeyframeSearchRadius: 50.0
 
-# CPU Params
-numberOfCores: 4                              # number of cores for mapping optimization
-mappingProcessInterval: 0.15                  # seconds, regulate mapping frequency
+    # loop closure
+    loopClosureEnableFlag: true
+    loopClosureFrequency: 1.0
+    surroundingKeyframeSize: 50
+    historyKeyframeSearchRadius: 15.0
+    historyKeyframeSearchTimeDiff: 30.0
+    historyKeyframeSearchNum: 25
+    historyKeyframeFitnessScore: 0.3
 
-# Surrounding map
-surroundingkeyframeAddingDistThreshold: 1.0   # meters, regulate keyframe adding threshold
-surroundingkeyframeAddingAngleThreshold: 0.2  # radians, regulate keyframe adding threshold
-surroundingKeyframeDensity: 2.0               # meters, downsample surrounding keyframe poses   
-surroundingKeyframeSearchRadius: 50.0         # meters, within n meters scan-to-map optimization (when loop closure disabled)
+    # gps
+    useImuHeadingInitialization: false
+    useGpsElevation: false
+    gpsCovThreshold: 2.0
+    poseCovThreshold: 25.0
 
-# Loop closure
-loopClosureEnableFlag: true                   # use loopclousre or not 
-loopClosureFrequency: 4.0                     # Hz, regulate loop closure constraint add frequency
-surroundingKeyframeSize: 50                   # submap size (when loop closure enabled)
-historyKeyframeSearchRadius: 1.5             # meters, key frame that is within n meters from current pose will be considerd for loop closure
-historyKeyframeSearchTimeDiff: 30.0           # seconds, key frame that is n seconds older will be considered for loop closure
-historyKeyframeSearchNum: 20                  # number of hostory key frames will be fused into a submap for loop closure
-historyKeyframeFitnessScore: 0.3              # icp threshold, the smaller the better alignment
+    # global map visualization
+    globalMapVisualizationSearchRadius: 1000.0
+    globalMapVisualizationPoseDensity: 10.0
+    globalMapVisualizationLeafSize: 1.0
 
-# Visualization
-globalMapVisualizationSearchRadius: 1000.0    # meters, global map visualization radius
-globalMapVisualizationPoseDensity: 10      # meters, global map visualization keyframe density
-globalMapVisualizationLeafSize: 1.0           # meters, global map visualization cloud density
+    visulize_IkdtreeMap: false
+    recontructKdTree: true
 
-# visual iktree_map  
-visulize_IkdtreeMap: true
-
-# visual iktree_map  
-recontructKdTree: true
-
-# Export settings
-savePCD: true                         # https://github.com/TixiaoShan/LIO-SAM/issues/3
-savePCDDirectory: "/fast_lio_sam_ws/src/FAST_LIO_SAM/PCD/"        # in your home folder, starts and ends with "/". Warning: the code deletes "LOAM" folder then recreates it. See "mapOptimization" for implementation
-
+    savePCD: true
+    savePCDDirectory: "/Downloads/LOAM/"

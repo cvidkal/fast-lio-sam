@@ -126,10 +126,14 @@ install(DIRECTORY config/
   DESTINATION share/${PROJECT_NAME}/config
   OPTIONAL
 )
-
-# launch / rviz_cfg 在 stage 5 落地后再 install
-# install(DIRECTORY launch/      DESTINATION share/${PROJECT_NAME}/launch)
-# install(DIRECTORY rviz_cfg/    DESTINATION share/${PROJECT_NAME}/rviz)
+install(DIRECTORY launch/
+  DESTINATION share/${PROJECT_NAME}/launch
+  OPTIONAL
+)
+install(DIRECTORY rviz_cfg/
+  DESTINATION share/${PROJECT_NAME}/rviz_cfg
+  OPTIONAL
+)
 
 # ============================================================
 # 测试 (lint + 后续 gtest)
