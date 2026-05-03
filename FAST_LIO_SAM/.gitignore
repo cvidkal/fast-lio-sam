@@ -1,0 +1,17 @@
+# ament / colcon 输出
+build/
+install/
+log/
+
+# 编辑器 / 缓存
+.vscode/
+.idea/
+*.pyc
+__pycache__/
+.DS_Store
+
+# CMake (本地)
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
