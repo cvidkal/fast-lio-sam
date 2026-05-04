@@ -1,40 +1,38 @@
-# ROS2 port of legacy/ros1/config/velodyne16.yaml.
-# 用法: ros2 launch fast_lio_sam mapping_velodyne16.launch.py
-#
-# ROS2 参数 YAML 必须用 /**:\n  ros__parameters:\n 包一层. 嵌套点 (.) 在
-# laserMapping.cpp 里 declare_parameter 时拆成嵌套 key, 见 main() 顶部.
+# 让 fast_lio_sam (lidar_type=2 Velodyne 兼容) 通过 dog_mapping_ws 里的
+# airy_bridge 吃 Airy 数据. 配置参考 dog_mapping_ws/config/airy_fastlio_loose.yaml.
+# 真正出图需要 rslidar_sdk POINT_TYPE=XYZIRT 重录 bag, 见 dog_mapping_ws/README.md.
 /**:
   ros__parameters:
     publish:
       path_en: true
       scan_publish_en: true
       dense_publish_en: true
-      scan_bodyframe_pub_en: true
+      scan_bodyframe_pub_en: false
 
     common:
       lid_topic: "/velodyne_points"
-      imu_topic: "/imu/data"
+      imu_topic: "/rslidar_imu_data"
       time_sync_en: false
-      data_mode: 0           # 0=live ROS topic; 1=已废弃, 离线回放用 ros2 bag play
+      data_mode: 0
       bag_path: ""
       gnss_topic: "/gps/fix"
 
     preprocess:
-      blind: 1.0
-      lidar_type: 2          # 1 Livox / 2 Velodyne / 3 Ouster / 4 Robosense (issue #2)
-      scan_line: 16
+      blind: 0.3
+      lidar_type: 2          # Velodyne (airy_bridge 输出格式)
+      scan_line: 192
       scan_rate: 10
       livox_type: 1
 
     mapping:
-      acc_cov: 0.1
-      gyr_cov: 0.1
-      b_acc_cov: 0.0001
-      b_gyr_cov: 0.0001
-      fov_degree: 180.0
-      det_range: 100.0
-      extrinsic_est_en: true
-      extrinsic_T: [0.0, 0.0, 0.28]
+      acc_cov: 0.5
+      gyr_cov: 0.5
+      b_acc_cov: 0.0005
+      b_gyr_cov: 0.0005
+      fov_degree: 360.0
+      det_range: 60.0
+      extrinsic_est_en: false
+      extrinsic_T: [0.0, 0.0, 0.0]
       extrinsic_R: [1.0, 0.0, 0.0,
                     0.0, 1.0, 0.0,
                     0.0, 0.0, 1.0]
@@ -48,32 +46,29 @@
       interval: -1
 
     feature_extract_enable: false
-    point_filter_num: 4
-    max_iteration: 4
-    filter_size_corner: 0.5
-    filter_size_surf: 0.5
-    filter_size_map: 0.5
+    point_filter_num: 1
+    max_iteration: 10
+    filter_size_corner: 0.1
+    filter_size_surf: 0.1
+    filter_size_map: 0.1
     cube_side_length: 1000.0
     runtime_pos_log_enable: false
     map_file_path: ""
 
-    # voxel filter
-    odometrySurfLeafSize: 0.4
-    mappingCornerLeafSize: 0.2
-    mappingSurfLeafSize: 0.4
+    odometrySurfLeafSize: 0.2
+    mappingCornerLeafSize: 0.1
+    mappingSurfLeafSize: 0.2
     z_tollerance: 1000.0
     rotation_tollerance: 1000.0
 
     numberOfCores: 4
     mappingProcessInterval: 0.15
 
-    # save keyframes
     surroundingkeyframeAddingDistThreshold: 1.0
     surroundingkeyframeAddingAngleThreshold: 0.2
     surroundingKeyframeDensity: 2.0
     surroundingKeyframeSearchRadius: 50.0
 
-    # loop closure
     loopClosureEnableFlag: true
     loopClosureFrequency: 1.0
     surroundingKeyframeSize: 50
@@ -82,13 +77,11 @@
     historyKeyframeSearchNum: 25
     historyKeyframeFitnessScore: 0.3
 
-    # gps
     useImuHeadingInitialization: false
     useGpsElevation: false
     gpsCovThreshold: 2.0
     poseCovThreshold: 25.0
 
-    # global map visualization
     globalMapVisualizationSearchRadius: 1000.0
     globalMapVisualizationPoseDensity: 10.0
     globalMapVisualizationLeafSize: 1.0
@@ -97,4 +90,4 @@
     recontructKdTree: true
 
     savePCD: true
-    savePCDDirectory: "/Downloads/LOAM/"
+    savePCDDirectory: "/tmp/fls_airy/"

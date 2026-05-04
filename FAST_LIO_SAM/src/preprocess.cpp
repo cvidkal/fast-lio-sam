@@ -1,5 +1,7 @@
 #include "preprocess.h"
 
+using namespace std;  // NOLINT - 保留以减小 stage 3 diff 体量, 后续单独清理
+
 #define RETURN0 0x00
 #define RETURN0AND1 0x10
 
@@ -38,12 +40,14 @@ void Preprocess::set(bool feat_en, int lid_type, double bld, int pfilt_num) {
     point_filter_num = pfilt_num;
 }
 
-void Preprocess::process(const livox_ros_driver::CustomMsg::ConstPtr &msg, PointCloudXYZI::Ptr &pcl_out) {
+void Preprocess::process(const livox_ros_driver2::msg::CustomMsg::ConstSharedPtr &msg,
+                         PointCloudXYZI::Ptr &pcl_out) {
     avia_handler(msg);
     *pcl_out = pl_surf;  // 储存间隔采样点
 }
 
-void Preprocess::process(const sensor_msgs::PointCloud2::ConstPtr &msg, PointCloudXYZI::Ptr &pcl_out) {
+void Preprocess::process(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg,
+                         PointCloudXYZI::Ptr &pcl_out) {
     switch (lidar_type) {
         case OUST64:
             oust64_handler(msg);
@@ -67,7 +71,7 @@ void Preprocess::process(const sensor_msgs::PointCloud2::ConstPtr &msg, PointClo
     *pcl_out = pl_surf;
 }
 
-void Preprocess::livox_ros_skyland_handler(const sensor_msgs::PointCloud2::ConstPtr &msg) {
+void Preprocess::livox_ros_skyland_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg) {
     /* 清除之前的点云缓存 */
     pl_surf.clear();
     pl_corn.clear();
@@ -119,7 +123,7 @@ void Preprocess::livox_ros_skyland_handler(const sensor_msgs::PointCloud2::Const
         }
     }
 }
-void Preprocess::avia_handler(const livox_ros_driver::CustomMsg::ConstPtr &msg) {
+void Preprocess::avia_handler(const livox_ros_driver2::msg::CustomMsg::ConstSharedPtr &msg) {
     pl_surf.clear();
     pl_corn.clear();
     pl_full.clear();
@@ -211,7 +215,7 @@ void Preprocess::avia_handler(const livox_ros_driver::CustomMsg::ConstPtr &msg) 
     }
 }
 
-void Preprocess::oust64_handler(const sensor_msgs::PointCloud2::ConstPtr &msg) {
+void Preprocess::oust64_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg) {
     pl_surf.clear();
     pl_corn.clear();
     pl_full.clear();
@@ -267,7 +271,8 @@ void Preprocess::oust64_handler(const sensor_msgs::PointCloud2::ConstPtr &msg) {
             give_feature(pl, types);
         }
     } else {
-        double time_stamp = msg->header.stamp.toSec();
+        double time_stamp = rclcpp::Time(msg->header.stamp).seconds();
+        (void)time_stamp;  // 原 ROS1 代码就没用上, 保留作为时间引用
         // cout << "===================================" << endl;
         // printf("Pt size = %d, N_SCANS = %d\r\n", plsize, N_SCANS);
         for (int i = 0; i < pl_orig.points.size(); i++) {
@@ -296,7 +301,7 @@ void Preprocess::oust64_handler(const sensor_msgs::PointCloud2::ConstPtr &msg) {
     // pub_func(pl_surf, pub_corn, msg->header.stamp);
 }
 
-void Preprocess::velodyne_handler(const sensor_msgs::PointCloud2::ConstPtr &msg) {
+void Preprocess::velodyne_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg) {
     pl_surf.clear();
     pl_corn.clear();
     pl_full.clear();
@@ -734,14 +739,8 @@ void Preprocess::give_feature(pcl::PointCloud<PointType> &pl, vector<orgtype> &t
     }
 }
 
-void Preprocess::pub_func(PointCloudXYZI &pl, const ros::Time &ct) {
-    pl.height = 1;
-    pl.width = pl.size();
-    sensor_msgs::PointCloud2 output;
-    pcl::toROSMsg(pl, output);
-    output.header.frame_id = "livox";
-    output.header.stamp = ct;
-}
+// pub_func 在 ROS1 时期就是 dead code (创建消息但从未发布), 移植到 ROS2 时直接删除.
+// 如果将来需要发布预处理后的点云, 由调用方持有 rclcpp::Publisher.
 
 // （line点云，点属性， 当前点索引，当前点索引，当前方向）
 int Preprocess::plane_judge(const PointCloudXYZI &pl, vector<orgtype> &types, uint i_cur, uint &i_nex,
@@ -882,7 +881,7 @@ bool Preprocess::edge_jump_judge(const PointCloudXYZI &pl, vector<orgtype> &type
     return true;
 }
 
-void Preprocess::rs_handler(const sensor_msgs::PointCloud2_<allocator<void>>::ConstPtr &msg) {
+void Preprocess::rs_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg) {
     pl_surf.clear();
     pl_corn.clear();
     pl_full.clear();

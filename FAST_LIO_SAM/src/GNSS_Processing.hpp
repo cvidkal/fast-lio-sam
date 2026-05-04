@@ -1,19 +1,19 @@
+// Ported to ROS2 in stage 3/6 (refs #1).
 #include <common_lib.h>
-#include <eigen_conversions/eigen_msg.h>
-#include <geometry_msgs/Vector3.h>
 #include <math.h>
-#include <nav_msgs/Odometry.h>
 #include <pcl/common/io.h>
 #include <pcl/common/transforms.h>
 #include <pcl/kdtree/kdtree_flann.h>
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 #include <pcl_conversions/pcl_conversions.h>
-#include <ros/ros.h>
-#include <sensor_msgs/Imu.h>
-#include <sensor_msgs/PointCloud2.h>
 #include <so3_math.h>
-#include <tf/transform_broadcaster.h>
+
+#include <rclcpp/rclcpp.hpp>
+#include <geometry_msgs/msg/vector3.hpp>
+#include <nav_msgs/msg/odometry.hpp>
+#include <sensor_msgs/msg/imu.hpp>
+#include <sensor_msgs/msg/point_cloud2.hpp>
 #include <Eigen/Eigen>
 #include <cmath>
 #include <condition_variable>
@@ -86,7 +86,7 @@ GnssProcess::~GnssProcess() {}
 // 初始化原点， WGS84 -> ENU   ???  调试结果好像是 NED 北东地
 void GnssProcess::InitOriginPosition(double latitude, double longitude, double altitude) {
     geo_converter.Reset(latitude, longitude, altitude);
-    ROS_INFO("Init    Gnss  OriginPosition");
+    RCLCPP_INFO(rclcpp::get_logger("gnss_process"), "Init    Gnss  OriginPosition");
     origin_latitude = latitude;
     origin_longitude = longitude;
     origin_altitude = altitude;
