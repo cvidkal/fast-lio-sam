@@ -134,6 +134,15 @@ install(DIRECTORY rviz_cfg/
   DESTINATION share/${PROJECT_NAME}/rviz_cfg
   OPTIONAL
 )
+install(DIRECTORY scripts/
+  DESTINATION share/${PROJECT_NAME}/scripts
+  OPTIONAL
+  USE_SOURCE_PERMISSIONS
+)
+install(DIRECTORY docs/
+  DESTINATION share/${PROJECT_NAME}/docs
+  OPTIONAL
+)
 
 # ============================================================
 # 测试 (lint + 后续 gtest)
