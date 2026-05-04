@@ -95,3 +95,37 @@ ros2 bag play /home/nvidia/mou/dog/bags/airy_20260503_103138 --clock --rate 0.3
 4. 用相同 launch 跑, 但配置文件改成更紧的版本 (config/airy.yaml, issue #2 落地后)
 
 预计漂移降一两个数量级.
+
+## 烟测 v2: 真实 XYZIRT 数据 (2026-05-04)
+
+按"修复路径"重做了一遍. 结果和预期一致, 但**踩出了 5 个新坑** (都已记录在 dog_mapping_ws/README.md 的"已知坑"节).
+
+**配置**: rslidar_sdk POINT_TYPE=XYZIRT 重编, scan_line 改成实测的 96 (不是 192), 静止 30s LIVE 模式 (不回放 bag).
+
+**结果**:
+
+| 指标 | v1 (伪造字段) | **v2 (真实 XYZIRT)** |
+|---|---|---|
+| bbox | 162 × 207 × 40 m | **7.07 × 4.64 × 2.33 m** ✅ 真实房间尺寸 |
+| 点数 | 51 M | 2.66 M |
+| loop back | 大量 | **0** |
+| No Effective | 0 (但漂移) | **0** |
+| Odometry 频率 | 3.5 Hz | 3.8 Hz |
+
+数量级差距确认: **POINT_TYPE=XYZIRT 是 Airy + FAST-LIO 的硬性前提**, 不是可选项.
+
+## 真实数据踩出的 5 个坑
+
+(都在 `dog_mapping_ws/README.md` "已知坑" 节有记录)
+
+1. **rslidar_sdk POINT_TYPE 默认 XYZI, 必须切 XYZIRT** — 没 ring/timestamp LIO 直接漂. 而且如果是非 owner 编 cmake, configure_file 会因 utime EPERM 报错, 要先删 `*.in` 的目标文件.
+
+2. **eno1 网口需要 UP + 192.168.1.102/24** — driver bind 才能成 (一开始网线插着但接口 DOWN, 翻车了 10 分钟).
+
+3. **FastDDS shm 跨用户死锁** — driver 跑 nvidia 用户 (systemd), 应用跑 cgj 用户. `/dev/shm/fastrtps_*` 的权限链对另一边不通, 消息默默丢失. 表现非常诡异 (`topic list` 看得到, `echo` / `hz` 收不到). 解决: 强制走 UDP, 见 `dog_mapping_ws/config/fastdds_no_shm.xml`.
+
+4. **airy_bridge 默认 BEST_EFFORT pub** vs **FAST-LIO velodyne handler 默认 RELIABLE sub** — DDS 不匹配, fastlio 永远收不到. 改 bridge 输出端为 RELIABLE 就通. (社区/教学版 ROS2 节点常踩这个坑.)
+
+5. **回放 bag 时 driver 还在 LIVE 发同名 topic** — 双源混乱, 同一个 `/rslidar_points` 上的 stamp 来回跳, fastlio 触发 "lidar loop back" 雪崩. 解决: 回放前 stop driver service, 或干脆只用 LIVE 模式不回放.
+
+这些坑是 ROS2 移植本身的功能完整性 **之外** 的部署陷阱, 但任何想真正用这个 fork 跑 Airy 数据的人都会撞上, 所以记录在案.
