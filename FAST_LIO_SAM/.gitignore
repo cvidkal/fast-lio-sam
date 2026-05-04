@@ -21,3 +21,4 @@ PCD/*.pcd
 *.pgm
 *.bag
 results/*.pcd
+results/
