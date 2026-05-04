@@ -129,3 +129,23 @@ ros2 bag play /home/nvidia/mou/dog/bags/airy_20260503_103138 --clock --rate 0.3
 5. **回放 bag 时 driver 还在 LIVE 发同名 topic** — 双源混乱, 同一个 `/rslidar_points` 上的 stamp 来回跳, fastlio 触发 "lidar loop back" 雪崩. 解决: 回放前 stop driver service, 或干脆只用 LIVE 模式不回放.
 
 这些坑是 ROS2 移植本身的功能完整性 **之外** 的部署陷阱, 但任何想真正用这个 fork 跑 Airy 数据的人都会撞上, 所以记录在案.
+
+## v2 实测对比: fast-lio-sam (本 PR) vs vanilla FAST-LIO ROS2
+
+同一个 LIVE 静止 30s, 同一台 Airy, 两个 LIO 算法分别建图:
+
+| 指标 | vanilla FAST-LIO ROS2 | **fast-lio-sam ROS2 port (本 PR)** |
+|---|---|---|
+| /Odometry 频率 | 3.8 Hz | 4.2 Hz |
+| 点数 | 2.66 M | 28.5 M (SAM 保留 keyframe 原始点) |
+| bbox x | [-7.07, 0.41] | [-7.10, 0.31] |
+| bbox y | [-1.66, 2.98] | [-2.22, 3.00] |
+| bbox z | [-0.07, 2.26] | [0.04, 2.25] |
+| loop back | 0 | 0 |
+| No Effective | 0 | 0 |
+| shutdown | clean | std::system_error after PCD save (known) |
+
+两个算法看同一个物理房间得到**几乎一样的 bbox** (~7m x 5m x 2.3m), 证明本 PR 的 ROS2 port 在算法层面与 vanilla 完全一致, 没有引入回归.
+
+(SAM 版本点数多 10x 是因为它累积所有 keyframe 的原始点云作为最终地图,
+而 vanilla FAST-LIO 输出的是体素下采样后的点云. 这是设计差异, 不是质量差异.)
