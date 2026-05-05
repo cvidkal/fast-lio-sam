@@ -60,6 +60,9 @@ void Preprocess::process(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &ms
         case RS128:
             rs_handler(msg);
             break;
+        case RSLIDAR_NEW:
+            rslidar_new_handler(msg);
+            break;
         case LIVOX:
             if (livox_type == LIVOX_ROS_SKYLAND) livox_ros_skyland_handler(msg);
             break;
@@ -1030,6 +1033,111 @@ void Preprocess::rs_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr 
                     pl_surf.points.push_back(added_pt);
                 }
             }
+        }
+    }
+}
+
+// ----------------------------------------------------------------------
+// rslidar_new_handler: 现行 rslidar_sdk POINT_TYPE=XYZIRT 的 PointXYZIRT
+// (double timestamp 绝对秒) 直接喂. 不再需要 airy_bridge 中转.
+//
+// 关键差异 vs rs_handler:
+//   - 字段类型: double timestamp (绝对) vs float time (相对 ms)
+//   - timestamp 始终都有, given_offset_time 永远 true, 不需要 yaw 兜底
+//   - per-point curvature = (point.timestamp - frame_t0) * 1000  [ms]
+// ----------------------------------------------------------------------
+void Preprocess::rslidar_new_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg) {
+    pl_surf.clear();
+    pl_corn.clear();
+    pl_full.clear();
+
+    pcl::PointCloud<robosense_ros::Point> pl_orig;
+    pcl::fromROSMsg(*msg, pl_orig);
+    int plsize = pl_orig.points.size();
+    if (plsize == 0) return;
+    pl_surf.reserve(plsize);
+
+    // 帧首时间: 找有效的最小 timestamp 当 t0
+    double t0 = 0.0;
+    bool t0_set = false;
+    for (int i = 0; i < plsize; ++i) {
+        const double t = pl_orig.points[i].timestamp;
+        if (std::isfinite(t) && (!t0_set || t < t0)) {
+            t0 = t;
+            t0_set = true;
+        }
+    }
+    if (!t0_set) {
+        // 整帧 timestamp 都是 NaN, 退化用 header.stamp
+        t0 = rclcpp::Time(msg->header.stamp).seconds();
+    }
+
+    given_offset_time = true;  // 我们始终能算出 per-point time, 不需 yaw 兜底
+
+    if (feature_enabled) {
+        // 特征提取路径: 按 ring 分桶
+        const int n_scan = std::min(N_SCANS, kMaxScanLines);
+        for (int i = 0; i < n_scan; ++i) {
+            pl_buff[i].clear();
+            pl_buff[i].reserve(plsize / std::max(n_scan, 1));
+        }
+        for (int i = 0; i < plsize; ++i) {
+            const auto &p = pl_orig.points[i];
+            if (p.ring >= n_scan) continue;
+            if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) continue;
+            PointType added_pt;
+            added_pt.normal_x = 0;
+            added_pt.normal_y = 0;
+            added_pt.normal_z = 0;
+            added_pt.x = p.x;
+            added_pt.y = p.y;
+            added_pt.z = p.z;
+            added_pt.intensity = p.intensity;
+            added_pt.curvature = std::isfinite(p.timestamp)
+                                     ? static_cast<float>((p.timestamp - t0) * 1000.0)
+                                     : 0.0f;  // ms
+            pl_buff[p.ring].points.push_back(added_pt);
+        }
+        for (int j = 0; j < n_scan; ++j) {
+            PointCloudXYZI &pl = pl_buff[j];
+            int linesize = pl.size();
+            if (linesize < 2) continue;
+            std::vector<orgtype> &types = typess[j];
+            types.clear();
+            types.resize(linesize);
+            linesize--;
+            for (uint i = 0; i < (uint)linesize; ++i) {
+                types[i].range = std::sqrt(pl[i].x * pl[i].x + pl[i].y * pl[i].y);
+                vx = pl[i].x - pl[i + 1].x;
+                vy = pl[i].y - pl[i + 1].y;
+                vz = pl[i].z - pl[i + 1].z;
+                types[i].dista = vx * vx + vy * vy + vz * vz;
+            }
+            types[linesize].range =
+                std::sqrt(pl[linesize].x * pl[linesize].x + pl[linesize].y * pl[linesize].y);
+            give_feature(pl, types);
+        }
+    } else {
+        // 直接采样路径 (FAST-LIO2 推荐)
+        for (int i = 0; i < plsize; ++i) {
+            if (i % point_filter_num != 0) continue;
+            const auto &p = pl_orig.points[i];
+            if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) continue;
+            const double r2 = p.x * p.x + p.y * p.y + p.z * p.z;
+            if (r2 <= blind * blind) continue;
+
+            PointType added_pt;
+            added_pt.normal_x = 0;
+            added_pt.normal_y = 0;
+            added_pt.normal_z = 0;
+            added_pt.x = p.x;
+            added_pt.y = p.y;
+            added_pt.z = p.z;
+            added_pt.intensity = p.intensity;
+            added_pt.curvature = std::isfinite(p.timestamp)
+                                     ? static_cast<float>((p.timestamp - t0) * 1000.0)
+                                     : 0.0f;  // ms
+            pl_surf.points.push_back(added_pt);
         }
     }
 }

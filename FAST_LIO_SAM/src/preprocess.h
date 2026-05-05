@@ -25,7 +25,14 @@
 typedef pcl::PointXYZINormal PointType;
 typedef pcl::PointCloud<PointType> PointCloudXYZI;
 
-enum LID_TYPE { LIVOX = 1, VELO16, OUST64, RS128 };  //{1, 2, 3, 4}
+enum LID_TYPE {
+    LIVOX = 1,
+    VELO16,        // 2: Velodyne 16-line 兼容布局 (float relative time + ring)
+    OUST64,        // 3: Ouster
+    RS128,         // 4: 老 suteng_msgs 的 rslidar_ros::Point (float time, RELATIVE)
+    RSLIDAR_NEW,   // 5: 现行 rslidar_sdk v1.5+ PointXYZIRT (double timestamp, ABSOLUTE)
+                   //    覆盖 Helios / Airy / Bpearl / E1 / RS-LiDAR-M1 等
+};
 enum Feature {
     Nor,
     Poss_Plane,
@@ -115,6 +122,25 @@ POINT_CLOUD_REGISTER_POINT_STRUCT(rslidar_ros::Point,
                                                                           curvature)(float, time, normal_x)(std::uint16_t,
                                                                                                             ring, ring))
 
+// 现行 rslidar_sdk v1.5+ 在 POINT_TYPE=XYZIRT 下输出的标准点结构.
+// 字段命名/类型/语义和老的 rslidar_ros::Point 都不一样:
+//   timestamp 是 double 绝对 UNIX 秒, ring 是 uint16.
+// 覆盖 Helios / Airy / Bpearl / E1 / M1 / Ruby Plus 等所有现行 RoboSense 雷达.
+namespace robosense_ros {
+struct EIGEN_ALIGN16 Point {
+    PCL_ADD_POINT4D;
+    PCL_ADD_INTENSITY;
+    uint16_t ring;
+    double timestamp;
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+};
+}  // namespace robosense_ros
+POINT_CLOUD_REGISTER_POINT_STRUCT(robosense_ros::Point,
+                                  (float, x, x)(float, y, y)(float, z, z)
+                                  (float, intensity, intensity)
+                                  (std::uint16_t, ring, ring)
+                                  (double, timestamp, timestamp))
+
 namespace ouster_ros {
 struct EIGEN_ALIGN16 Point {
     PCL_ADD_POINT4D;
@@ -175,8 +201,11 @@ class Preprocess {
 
     // ---- 数据成员 ----
     PointCloudXYZI pl_full, pl_corn, pl_surf;       // 全部点 / 角点 / 面点
-    PointCloudXYZI pl_buff[128];                    // maximum 128 line lidar
-    std::vector<orgtype> typess[128];               // maximum 128 line lidar
+    // 上限 256 兼容 192 线 (Airy 是 96/192 线模式可切换).
+    // 单帧最多分线后, 192 行就够了, 256 留一点冗余.
+    static constexpr int kMaxScanLines = 256;
+    PointCloudXYZI pl_buff[kMaxScanLines];
+    std::vector<orgtype> typess[kMaxScanLines];
     int lidar_type;
     int livox_type;
     int point_filter_num;
@@ -192,6 +221,8 @@ class Preprocess {
     void velodyne_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg);
     void livox_ros_skyland_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg);
     void rs_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg);
+    // 现行 rslidar_sdk PointXYZIRT (double timestamp) 路径, 见 LID_TYPE::RSLIDAR_NEW
+    void rslidar_new_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg);
     void give_feature(PointCloudXYZI &pl, std::vector<orgtype> &types);
     int plane_judge(const PointCloudXYZI &pl, std::vector<orgtype> &types, uint i, uint &i_nex,
                     Eigen::Vector3d &curr_direct);
