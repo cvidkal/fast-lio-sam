@@ -1,0 +1,102 @@
+# RoboSense Airy 192/96 线 - 原生 PointXYZIRT 路径 (lidar_type=5).
+# 直接订阅 rslidar_sdk 的 /rslidar_points + /rslidar_imu_data,
+# 不再需要 airy_bridge.
+#
+# 前提: rslidar_sdk 编译时 POINT_TYPE=XYZIRT + ENABLE_IMU_DATA_PARSE=ON.
+#
+# 用法:
+#   ros2 launch fast_lio_sam mapping_airy.launch.py
+/**:
+  ros__parameters:
+    publish:
+      path_en: true
+      scan_publish_en: true
+      dense_publish_en: true
+      scan_bodyframe_pub_en: false
+
+    common:
+      lid_topic: "/rslidar_points"     # 原生订阅, 无需 bridge
+      imu_topic: "/rslidar_imu_data"
+      time_sync_en: false
+      data_mode: 0
+      bag_path: ""
+      gnss_topic: "/gps/fix"
+
+    preprocess:
+      blind: 0.5
+      lidar_type: 5                    # RSLIDAR_NEW (PointXYZIRT, double timestamp)
+      scan_line: 96                    # Airy 96-channel 模式; 192 模式时改 192
+      scan_rate: 10
+      livox_type: 1                    # 不用, 占位
+
+    mapping:
+      acc_cov: 0.1
+      gyr_cov: 0.1
+      b_acc_cov: 0.0001
+      b_gyr_cov: 0.0001
+      fov_degree: 360.0
+      det_range: 60.0
+      extrinsic_est_en: true            # 外参在线估计 (无 DIFOP 真值时)
+      extrinsic_T: [0.0, 0.0, 0.0]
+      extrinsic_R: [1.0, 0.0, 0.0,
+                    0.0, 1.0, 0.0,
+                    0.0, 0.0, 1.0]
+      extrinT_Gnss2Lidar: [0.0, 0.0, 0.0]
+      extrinR_Gnss2Lidar: [1.0, 0.0, 0.0,
+                           0.0, 1.0, 0.0,
+                           0.0, 0.0, 1.0]
+
+    pcd_save:
+      pcd_save_en: true
+      interval: -1
+
+    feature_extract_enable: false
+    point_filter_num: 4               # Airy 单帧 ~86k 点, 取 1/4 减算力
+    max_iteration: 4
+    filter_size_corner: 0.3
+    filter_size_surf: 0.3
+    filter_size_map: 0.3
+    cube_side_length: 1000.0
+    runtime_pos_log_enable: false
+    map_file_path: ""
+
+    odometrySurfLeafSize: 0.2
+    mappingCornerLeafSize: 0.1
+    mappingSurfLeafSize: 0.2
+    z_tollerance: 1000.0
+    rotation_tollerance: 1000.0
+
+    numberOfCores: 4
+    mappingProcessInterval: 0.15
+
+    # 关键帧 (SAM)
+    surroundingkeyframeAddingDistThreshold: 1.0
+    surroundingkeyframeAddingAngleThreshold: 0.2
+    surroundingKeyframeDensity: 2.0
+    surroundingKeyframeSearchRadius: 50.0
+
+    # 回环检测 (SAM/PGO)
+    loopClosureEnableFlag: true
+    loopClosureFrequency: 1.0
+    surroundingKeyframeSize: 50
+    historyKeyframeSearchRadius: 15.0
+    historyKeyframeSearchTimeDiff: 30.0
+    historyKeyframeSearchNum: 25
+    historyKeyframeFitnessScore: 0.3
+
+    # GPS
+    useImuHeadingInitialization: false
+    useGpsElevation: false
+    gpsCovThreshold: 2.0
+    poseCovThreshold: 25.0
+
+    # 可视化
+    globalMapVisualizationSearchRadius: 1000.0
+    globalMapVisualizationPoseDensity: 10.0
+    globalMapVisualizationLeafSize: 1.0
+
+    visulize_IkdtreeMap: false
+    recontructKdTree: true
+
+    savePCD: true
+    savePCDDirectory: "/Downloads/LOAM/"
