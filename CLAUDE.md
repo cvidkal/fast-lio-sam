@@ -149,7 +149,6 @@ python3 .../tools/airy_extrinsic/airy_extrinsic.py live --port 7788 -o airy_extr
 
 ## 已知小毛病 / TODO
 
-- **shutdown segfault**: ROS2 port 退出时偶尔 `terminate called after throwing an instance of 'std::system_error'`。PCD 已落盘后才发生, 不丢数据, 但需要 fix。怀疑 spin 循环里 `rclcpp::shutdown()` 后还有 publisher/subscriber 析构。
 - **`wrapper/bag_io.cc` 禁用中**: 依赖内部 `lightning` framework (IMUPtr / Vec3d / global ToSec), 不在 repo 里。`#include` 注释了, CMakeLists 不编。离线回放走 `ros2 bag play --clock` 路径 (`mapping_bag.launch.py`)。
 - **PGO 静止欠定**: SAM 因子图在纯静止数据上会抛 `IndeterminantLinearSystemException`。算法本性, 不是 bug, 但要在文档里 highlight。
 - **`scan_line` 与硬件**: Airy 96/192 模式可切, 但 yaml 里要手动改 (rslidar_sdk DIFOP install_mode 决定实际值)。当前 `airy.yaml` 写 96。

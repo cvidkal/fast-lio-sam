@@ -2642,5 +2642,24 @@ int main(int argc, char** argv) {
     startFlag = false;
     loopthread.join();  //  分离线程
 
+    // ROS2 移植析构顺序修复:
+    // 局部 `node` (line 2130) 在 main return 时先析构, 但下面这些全局 SharedPtr 持有
+    // node 引用; 它们在 main return 之后才析构, 此时 node context 已死,
+    // rmw 删 datawriter / service 时崩 (rmw_publish.cpp:62 / rmw_service.cpp:104, SIGSEGV).
+    // 显式按"逆创建顺序"释放, 让 node 最后死.
+    pubLoopConstraintEdge.reset();
+    pubIcpKeyFrames.reset();
+    pubHistoryKeyFrames.reset();
+    pubRecentKeyFrame.reset();
+    pubRecentKeyFrames.reset();
+    pubCloudRegisteredRaw.reset();
+    pubOptimizedGlobalMap.reset();
+    pubLaserCloudSurround.reset();
+    pubGnssPath.reset();
+    srvSavePose.reset();
+    srvSaveMap.reset();
+    g_tf_broadcaster.reset();
+
+    rclcpp::shutdown();
     return 0;
 }
