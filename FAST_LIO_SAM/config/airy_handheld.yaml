@@ -1,0 +1,124 @@
+# RoboSense Airy 96/192 - 手持采集预设 (基于 airy.yaml).
+#
+# 跟 airy.yaml 的差别:
+#   - extrinsic_est_en: false        在线估外参对手持模式不友好, 容易把
+#                                    剧烈手部抖动错误归因到外参漂移. 这里
+#                                    用 DIFOP 出厂外参写死 (见 extrinsic_T/R).
+#   - extrinsic_T / extrinsic_R      改为这台雷达 DIFOP 给出的真值. 不同
+#                                    机器请用 tools/airy_extrinsic 重新解析:
+#                                       python3 tools/airy_extrinsic/airy_extrinsic.py \
+#                                           live --port 7788 -o airy_<SN>.yaml
+#                                    然后把里面的 extrinsic_T / R 直接覆盖以下两段.
+#
+# 适用场景:
+#   - 人手持 Airy LiDAR 行走采集
+#   - 雷达背后挂一个采集卡 (jetson / 笔电) 通过网线接出来
+#   - 起步时不一定保持水平 -> 后期可用 tools/align_floor 校正重力
+#
+# 用法:
+#   ros2 launch fast_lio_sam mapping_airy.launch.py \
+#       config_file:=$(ros2 pkg prefix fast_lio_sam)/share/fast_lio_sam/config/airy_handheld.yaml
+#   或回放 bag:
+#   ros2 launch fast_lio_sam mapping_bag.launch.py bag:=<dir> \
+#       config_file:=.../airy_handheld.yaml
+/**:
+  ros__parameters:
+    publish:
+      path_en: true
+      scan_publish_en: true
+      dense_publish_en: true
+      scan_bodyframe_pub_en: false
+
+    common:
+      lid_topic: "/rslidar_points"
+      imu_topic: "/rslidar_imu_data"
+      time_sync_en: false
+      data_mode: 0
+      bag_path: ""
+      gnss_topic: "/gps/fix"
+
+    preprocess:
+      blind: 0.5
+      lidar_type: 5                    # RSLIDAR_NEW (PointXYZIRT, double timestamp)
+      scan_line: 96                    # Airy 96-channel; 192 模式时改 192
+      scan_rate: 10
+      livox_type: 1
+
+    mapping:
+      acc_cov: 0.1
+      gyr_cov: 0.1
+      b_acc_cov: 0.0001
+      b_gyr_cov: 0.0001
+      fov_degree: 360.0
+      det_range: 60.0
+
+      # 关掉外参在线估计 — 用下面 DIFOP 真值
+      extrinsic_est_en: false
+
+      # ↓↓↓ 这两行换成 tools/airy_extrinsic 解析你这台雷达的输出 ↓↓↓
+      # 当前数值是 SN 300DBEDB0075 的 DIFOP 出厂标定 (示例, 不通用)
+      extrinsic_T: [ 0.004250,  0.004180, -0.004460]
+      extrinsic_R: [-0.006915, -0.999975,  0.001559,
+                    -0.999950,  0.006903, -0.007273,
+                     0.007262, -0.001609, -0.999972]
+      # ↑↑↑ 这两行换成 tools/airy_extrinsic 解析你这台雷达的输出 ↑↑↑
+
+      extrinT_Gnss2Lidar: [0.0, 0.0, 0.0]
+      extrinR_Gnss2Lidar: [1.0, 0.0, 0.0,
+                           0.0, 1.0, 0.0,
+                           0.0, 0.0, 1.0]
+
+    pcd_save:
+      pcd_save_en: true
+      interval: -1
+
+    feature_extract_enable: false
+    point_filter_num: 4               # Airy 单帧 ~86k 点, 取 1/4 减算力
+    max_iteration: 4
+    filter_size_corner: 0.3
+    filter_size_surf: 0.3
+    filter_size_map: 0.3
+    cube_side_length: 1000.0
+    runtime_pos_log_enable: false
+    map_file_path: ""
+
+    odometrySurfLeafSize: 0.2
+    mappingCornerLeafSize: 0.1
+    mappingSurfLeafSize: 0.2
+    z_tollerance: 1000.0
+    rotation_tollerance: 1000.0
+
+    numberOfCores: 4
+    mappingProcessInterval: 0.15
+
+    # 关键帧 (SAM)
+    surroundingkeyframeAddingDistThreshold: 1.0
+    surroundingkeyframeAddingAngleThreshold: 0.2
+    surroundingKeyframeDensity: 2.0
+    surroundingKeyframeSearchRadius: 50.0
+
+    # 回环检测 (SAM/PGO)
+    loopClosureEnableFlag: true
+    loopClosureFrequency: 1.0
+    surroundingKeyframeSize: 50
+    historyKeyframeSearchRadius: 15.0
+    historyKeyframeSearchTimeDiff: 30.0
+    historyKeyframeSearchNum: 25
+    historyKeyframeFitnessScore: 0.3
+
+    # GPS
+    useImuHeadingInitialization: false
+    useGpsElevation: false
+    gpsCovThreshold: 2.0
+    poseCovThreshold: 25.0
+
+    # 可视化
+    globalMapVisualizationSearchRadius: 1000.0
+    globalMapVisualizationPoseDensity: 10.0
+    globalMapVisualizationLeafSize: 1.0
+
+    visulize_IkdtreeMap: false
+    recontructKdTree: true
+
+    savePCD: true
+    savePCDDirectory: "/Downloads/LOAM/"
