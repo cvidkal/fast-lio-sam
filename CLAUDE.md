@@ -6,10 +6,13 @@
 
 `cvidkal/fast-lio-sam` 是 **HKU-MARS FAST-LIO2** 的一个 fork，叠了 **SAM/PGO 回环检测** (LIO-SAM 风格的 GTSAM 因子图后端)。本仓库已**完整移植到 ROS2 Humble** (PR #9)、原生支持 **RoboSense Airy / Helios / Bpearl** 等所有 `rslidar_sdk v1.5+ PointXYZIRT(double timestamp)` 雷达 (PR #11)。
 
-主要消费者: **机器狗 (quadruped)** 上的 LiDAR-Inertial 建图，硬件:
+主要消费者: **机器狗 (quadruped)** + **人手持采集**, 都是 LiDAR-Inertial 建图. 硬件:
 - NVIDIA Jetson Orin (aarch64 / Ubuntu 22.04 / ROS2 Humble)
 - RoboSense Airy 192/96 通道半球形 LiDAR (走 Ethernet 192.168.1.200 ↔ 主机 eno1 192.168.1.102)
 - 内置 Airy IMU (~200 Hz)
+
+> 手持采集模式注意: 起步时 IMU 通常没法保证水平 → FAST-LIO init 会把略歪的"重力方向"
+> 固化进世界坐标系 (实测可以差几度). 后处理工具 `tools/align_floor` 解决这个.
 
 ## 目录结构
 
@@ -28,15 +31,19 @@ FAST_LIO_SAM/
 │   └── IKFoM_toolkit/   ← 流形上 IKF
 ├── config/              ← ROS2 yaml (用 `/**:\n  ros__parameters:` 包一层)
 │   ├── velodyne16.yaml
-│   ├── airy.yaml         ← Airy 原生 lidar_type=5
+│   ├── airy.yaml         ← Airy 原生 lidar_type=5 (狗用, 默认 ext_est=true)
+│   ├── airy_handheld.yaml ← Airy 手持采集预设 (DIFOP 真外参 + ext_est=false)
 │   └── airy_via_bridge.yaml ← Airy 走 airy_bridge 兼容路径 (lidar_type=2)
 ├── launch/
 │   ├── mapping_velodyne16.launch.py
 │   ├── mapping_airy.launch.py     ← LIVE 建图 (driver 实时)
 │   └── mapping_bag.launch.py      ← rosbag2 回放 (PR #10)
 ├── tools/
-│   ├── pcd_to_occgrid/             ← PCD → nav2 PGM/YAML (PR #7)
-│   └── airy_extrinsic/             ← DIFOP 外参解析 CLI (PR #8)
+│   ├── pcd_to_occgrid/             ← PCD → nav2 PGM/YAML (PR #7), 支持 --raycast / --auto-floor
+│   ├── airy_extrinsic/             ← DIFOP 外参解析 CLI (PR #8) + examples/
+│   └── align_floor/                ← gravity 后校正 (RANSAC + Rodrigues)
+├── bin/
+│   └── run_with_savemap.sh         ← bag 跑完后自动调 /save_map 拿 PGO 修正 GlobalMap
 ├── scripts/
 │   └── bag_inspect.py              ← rosbag2 体检 (PR #10)
 ├── docs/
@@ -152,6 +159,8 @@ python3 .../tools/airy_extrinsic/airy_extrinsic.py live --port 7788 -o airy_extr
 - **`wrapper/bag_io.cc` 禁用中**: 依赖内部 `lightning` framework (IMUPtr / Vec3d / global ToSec), 不在 repo 里。`#include` 注释了, CMakeLists 不编。离线回放走 `ros2 bag play --clock` 路径 (`mapping_bag.launch.py`)。
 - **PGO 静止欠定**: SAM 因子图在纯静止数据上会抛 `IndeterminantLinearSystemException`。算法本性, 不是 bug, 但要在文档里 highlight。
 - **`scan_line` 与硬件**: Airy 96/192 模式可切, 但 yaml 里要手动改 (rslidar_sdk DIFOP install_mode 决定实际值)。当前 `airy.yaml` 写 96。
+- **`launch` 退出时不调 `saveMap`**: `src/laserMapping.cpp` 主循环退出后没自动 call `saveMapService`, 导致 PCD 用的是前端 IEKF 状态 (可能漂飞), 不是 PGO 修正后的. 临时方案: 用 `bin/run_with_savemap.sh` 在 SIGINT 前手动 `ros2 service call /save_map`. 长期方案: 在 main 末尾或 SigHandle 后加 `if (savePCD) saveMap();` 调用 (line 2545 那行注释).
+- **gravity 没真正对齐**: FAST-LIO 在 IMU init 那 0.1s 锁死世界 z. 手持/狗站歪时整张图差几度. 用 `tools/align_floor/align_floor.py` 后处理校正.
 
 ## 兄弟工作区
 
