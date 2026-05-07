@@ -1,0 +1,26 @@
+# 由 airy_extrinsic.py 自动生成 - 请勿手动编辑
+# 雷达 SN (DIFOP 字节 292..297): 300DBEDB0075
+# 原始四元数 [qx, qy, qz, qw] = [-0.704655,  0.709540, -0.003130, -0.002010]
+# 四元数模长: 1.000000 (理想 = 1)
+#
+# 生成方式:
+#   python3 -c "
+#   import sys, struct
+#   sys.path.insert(0, 'tools/airy_extrinsic')
+#   from airy_extrinsic import parse_difop, render_yaml
+#   hex_str = open('one_difop_packet.hex').read().strip()
+#   print(render_yaml(parse_difop(bytes.fromhex(hex_str))))
+#   " > examples/airy_<SN>.yaml
+# 或直接 live:
+#   sudo systemctl stop airy-lidar.service          # 释放 7788
+#   python3 tools/airy_extrinsic/airy_extrinsic.py \
+#       -o examples/airy_<SN>.yaml live --port 7788 --timeout 15
+#   sudo systemctl start airy-lidar.service
+
+mapping:
+  extrinsic_T: [ 0.004250,  0.004180, -0.004460]
+  extrinsic_R: [
+    -0.006915, -0.999975,  0.001559,
+    -0.999950,  0.006903, -0.007273,
+     0.007262, -0.001609, -0.999972
+  ]
