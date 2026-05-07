@@ -192,6 +192,49 @@ def auto_detect_floor_z(xyz: np.ndarray, low_pct: float = 5.0) -> float:
 
 
 # ============================================================
+# 多层场景检测 (基于轨迹 z)
+# ============================================================
+def detect_floor_layers(traj_z: np.ndarray, gap_threshold: float = 1.5) -> dict:
+    """
+    根据"采集设备走过的 z" 检测是否多层.
+
+    思路: 把 keyframe 的 z 排序, 看相邻间隔. 一层楼内 z 是连续的 (走路时 ±0.5m
+    起伏), 两层楼之间会有一段没走过的 z 区域 -> 排序 z 序列里出现一个大 gap.
+    阈值默认 1.5m (典型一层楼 2.7m, 取一半作为安全裕度).
+
+    比"空间点云 z 范围" 鲁棒得多: 点云 z 包含天花板 / 家具上沿 / 楼梯井干扰,
+    而轨迹 z = 设备实际经过的高度, 自然反映楼层结构.
+
+    返回 dict: n_layers / layer_centers / layer_z_ranges / max_gap_m / is_multi_floor.
+    """
+    z = np.sort(traj_z.astype(np.float64))
+    if len(z) < 2:
+        v = float(z[0]) if len(z) else 0.0
+        return {
+            'n_layers': 1,
+            'layer_centers': [v],
+            'layer_z_ranges': [(v, v)],
+            'max_gap_m': 0.0,
+            'is_multi_floor': False,
+        }
+    gaps = np.diff(z)
+    big = np.where(gaps > gap_threshold)[0]
+    splits = [0, *(big + 1).tolist(), len(z)]
+    centers, ranges = [], []
+    for a, b in zip(splits[:-1], splits[1:]):
+        seg = z[a:b]
+        centers.append(float(np.median(seg)))
+        ranges.append((float(seg.min()), float(seg.max())))
+    return {
+        'n_layers': len(centers),
+        'layer_centers': centers,
+        'layer_z_ranges': ranges,
+        'max_gap_m': float(gaps.max()),
+        'is_multi_floor': len(centers) > 1,
+    }
+
+
+# ============================================================
 # Raycast: 沿轨迹做 polar 扫描, 给 free space 涂白
 # ============================================================
 def raycast_free_from_trajectory(
@@ -358,6 +401,10 @@ def main() -> int:
                    help='raycast 最大距离 m (默认 30, 跟 Airy 等 LiDAR 室内有效距离一致)')
     p.add_argument('--raycast-angles', type=int, default=720,
                    help='raycast 极坐标 bin 数 (默认 720, 即 0.5°/bin)')
+    p.add_argument('--floor-gap-threshold', type=float, default=1.5,
+                   help='轨迹 z 排序后相邻间隔 > 此值 -> 视为多层 (m, 默认 1.5). 仅在传 --raycast 时生效.')
+    p.add_argument('--strict-single-floor', action='store_true',
+                   help='检测到多层时报错并退出 (默认仅 warn 后继续, 但结果不可信).')
     p.add_argument('--dilate', type=int, default=1,
                    help='障碍膨胀次数 (默认 1, 给 nav2 留点 inflation 缓冲)')
     args = p.parse_args()
@@ -393,6 +440,29 @@ def main() -> int:
         print(f'[INFO] 加载轨迹: {args.raycast}')
         traj = load_pcd_xyz(args.raycast)
         print(f'       共 {len(traj)} 关键帧, raycast max_range={args.raycast_max_range}m angles={args.raycast_angles}')
+
+        # 多层检测 (基于轨迹 z)
+        layers = detect_floor_layers(traj[:, 2], gap_threshold=args.floor_gap_threshold)
+        print(f'[INFO] 楼层检测: 轨迹 z 簇数 = {layers["n_layers"]}, max_gap = {layers["max_gap_m"]:.2f}m')
+        if layers['is_multi_floor']:
+            msg = (
+                '[WARN] 检测到多层场景:\n'
+                f'       轨迹 z 序列里有 {layers["n_layers"]} 个簇 '
+                f'(间隔 > {args.floor_gap_threshold:.2f}m)\n'
+                f'       簇中心 (z, m): ' + ', '.join(f'{c:+.2f}' for c in layers['layer_centers']) + '\n'
+                '       pcd_to_occgrid 当前只支持单层切片. 多层场景下:\n'
+                '         1) 切片会把不同楼层叠到同一张 PGM, 出现"穿透"现象\n'
+                '         2) raycast 会从一层 keyframe 透过楼板看到另一层 occupied,\n'
+                '            把楼板下方的格子误标 free\n'
+                '       建议:\n'
+                '         a) 用 --floor-z-range 手动选一层处理 (跑 N 次得 N 张 PGM)\n'
+                '         b) 等多层支持落地后再跑'
+            )
+            print(msg, file=sys.stderr)
+            if args.strict_single_floor:
+                print('[ERR] --strict-single-floor 拒绝继续', file=sys.stderr)
+                return 2
+
         grid = raycast_free_from_trajectory(
             grid, origin, args.resolution,
             traj_xy=traj[:, :2],

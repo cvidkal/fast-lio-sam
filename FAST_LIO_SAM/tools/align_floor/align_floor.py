@@ -129,6 +129,57 @@ def rodrigues_align(n: np.ndarray, target: np.ndarray = np.array([0.0, 0.0, 1.0]
 
 
 # ============================================================
+# 多层场景检测 (基于轨迹 z, 不是空间点云 z)
+# ============================================================
+def detect_floor_layers(traj_z: np.ndarray, gap_threshold: float = 1.5) -> dict:
+    """
+    根据"采集设备走过的 z" 检测是否多层.
+
+    思路: 把 keyframe 的 z 排序, 看相邻间隔. 一层楼内 z 是连续的 (走路时 ±0.5m
+    起伏), 两层楼之间会有一段没走过的 z 区域 -> 排序 z 序列里出现一个大 gap.
+    阈值默认 1.5m (典型一层楼 2.7m, 取一半作为安全裕度).
+
+    比"空间点云 z 范围" 鲁棒得多:
+      - 点云 z 包含天花板 / 家具上沿 / 楼梯井, 干扰多
+      - 轨迹 z = 设备实际经过的高度, 自然反映楼层结构
+
+    返回:
+        {
+          n_layers: int,
+          layer_centers: [z, ...] (median of each cluster, sorted ascending),
+          layer_z_ranges: [(min, max), ...],
+          max_gap_m: float,          # 排序 z 序列里最大相邻间隔
+          is_multi_floor: bool,
+        }
+    """
+    z = np.sort(traj_z.astype(np.float64))
+    if len(z) < 2:
+        v = float(z[0]) if len(z) else 0.0
+        return {
+            "n_layers": 1,
+            "layer_centers": [v],
+            "layer_z_ranges": [(v, v)],
+            "max_gap_m": 0.0,
+            "is_multi_floor": False,
+        }
+    gaps = np.diff(z)
+    big = np.where(gaps > gap_threshold)[0]
+    splits = [0, *(big + 1).tolist(), len(z)]
+    centers, ranges = [], []
+    for a, b in zip(splits[:-1], splits[1:]):
+        seg = z[a:b]
+        centers.append(float(np.median(seg)))
+        ranges.append((float(seg.min()), float(seg.max())))
+    return {
+        "n_layers": len(centers),
+        "layer_centers": centers,
+        "layer_z_ranges": ranges,
+        "max_gap_m": float(gaps.max()),
+        "is_multi_floor": len(centers) > 1,
+    }
+
+
+# ============================================================
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("input_dir", type=Path, help="包含 GlobalMap.pcd / trajectory.pcd 的目录")
@@ -143,6 +194,17 @@ def main() -> int:
     )
     ap.add_argument("--ransac-thresh", type=float, default=0.05, help="RANSAC 内点距离阈值 (m, 默认 0.05)")
     ap.add_argument("--ransac-iter", type=int, default=500, help="RANSAC 迭代数 (默认 500)")
+    ap.add_argument(
+        "--floor-gap-threshold",
+        type=float,
+        default=1.5,
+        help="轨迹 z 排序后相邻间隔 > 此值 -> 视为多层 (m, 默认 1.5)",
+    )
+    ap.add_argument(
+        "--strict-single-floor",
+        action="store_true",
+        help="检测到多层时报错并退出 (默认仅 warn 后继续)",
+    )
     args = ap.parse_args()
 
     in_dir: Path = args.input_dir
@@ -166,6 +228,30 @@ def main() -> int:
         print(f"[INFO] reading {traj_path}")
         traj_fields, traj_arr = read_pcd_binary(traj_path)
         print(f"       {len(traj_arr):,} 关键帧")
+
+        # 1.5) 多层检测 (基于轨迹 z, 不是空间点云 z)
+        layers = detect_floor_layers(traj_arr[:, 2], gap_threshold=args.floor_gap_threshold)
+        print(
+            f"[INFO] 楼层检测: 轨迹 z 簇数 = {layers['n_layers']}, "
+            f"max_gap = {layers['max_gap_m']:.2f}m"
+        )
+        if layers["is_multi_floor"]:
+            msg = (
+                "[WARN] 检测到多层场景:\n"
+                f"       轨迹 z 序列里有 {layers['n_layers']} 个簇 (间隔 > "
+                f"{args.floor_gap_threshold:.2f}m)\n"
+                f"       簇中心 (z, m): "
+                + ", ".join(f"{c:+.2f}" for c in layers["layer_centers"])
+                + "\n"
+                "       align_floor 当前只校一个重力方向 + 一个 z=0 基准.\n"
+                "       结果: 重力 OK (重力跨层一致), 但 z=0 会绑到 RANSAC\n"
+                "             点最多的那一层. 其他层的 z 不会归零.\n"
+                "       多层正确做法: 按轨迹 z 簇切分, 每层独立处理 -- 暂未实现."
+            )
+            print(msg, file=sys.stderr)
+            if args.strict_single_floor:
+                print("[ERR] --strict-single-floor 拒绝继续", file=sys.stderr)
+                return 2
 
     # 2) 选地面候选点
     if args.floor_z_range:
