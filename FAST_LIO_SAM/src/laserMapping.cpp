@@ -612,9 +612,9 @@ void addOdomFactor() {
         // 变量节点设置初始值
         initialEstimate.insert(0, trans2gtsamPose(transformTobeMapped));
     } else {
-        // 添加激光里程计因子
+        // 添加激光里程计因子. xy 7cm std, z 7cm std (回到对称, v3 z 放松反而让 xy 也飘).
         gtsam::noiseModel::Diagonal::shared_ptr odometryNoise =
-            gtsam::noiseModel::Diagonal::Variances((gtsam::Vector(6) << 1e-6, 1e-6, 1e-6, 1e-4, 1e-4, 1e-4).finished());
+            gtsam::noiseModel::Diagonal::Variances((gtsam::Vector(6) << 1e-5, 1e-5, 1e-5, 5e-3, 5e-3, 5e-3).finished());
         gtsam::Pose3 poseFrom = pclPointTogtsamPose3(cloudKeyPoses6D->points.back());  /// pre
         gtsam::Pose3 poseTo = trans2gtsamPose(transformTobeMapped);                    // cur
         // 参数：前一帧id，当前帧id，前一帧与当前帧的位姿变换（作为观测值），噪声协方差
@@ -996,9 +996,14 @@ void performLoopClosure() {
             publishCloud(pubHistoryKeyFrames, prevKeyframeCloud, timeLaserInfoStamp, odometryFrame);
     }
 
-    // ICP Settings
+    // ICP Settings.
+    // 原本 setMaxCorrespondenceDistance(150) 是 giseop 留给大尺度场景的, 但在 FAST-LIO
+    // 有 ~3m drift 时, 150m 让 ICP 把 cur 帧的点匹配到 prev 子图里完全错的对应,
+    // 看上去 fitness OK 实际 align 偏 3m, 再加上 loop noise 用 fitness × 6 (= 31° 旋转
+    // std), GTSAM 几乎忽略这种 loop, 出现重影.
+    // 5m 经验值: 既能 cover 几米 drift, 又不会跨房间错配.
     pcl::IterativeClosestPoint<PointType, PointType> icp;
-    icp.setMaxCorrespondenceDistance(150);  // giseop , use a value can cover 2*historyKeyframeSearchNum range in meter
+    icp.setMaxCorrespondenceDistance(5.0);
     icp.setMaximumIterations(100);
     icp.setTransformationEpsilon(1e-6);
     icp.setEuclideanFitnessEpsilon(1e-6);
@@ -1035,11 +1040,23 @@ void performLoopClosure() {
     gtsam::Pose3 poseFrom = gtsam::Pose3(gtsam::Rot3::RzRyRx(roll, pitch, yaw), gtsam::Point3(x, y, z));
     // 闭环匹配帧的位姿
     gtsam::Pose3 poseTo = pclPointTogtsamPose3(copy_cloudKeyPoses6D->points[loopKeyPre]);
+    // Loop noise: GTSAM Pose3 noise 顺序 (rx, ry, rz, x, y, z), 单位 rad²/m².
     gtsam::Vector Vector6(6);
-    float noiseScore = icp.getFitnessScore();  //  loop_clousre  noise from icp
-    Vector6 << noiseScore, noiseScore, noiseScore, noiseScore, noiseScore, noiseScore;
+    float noiseScore = icp.getFitnessScore();
+    float trans_var = std::max(noiseScore, 1e-4f);  // floor 1cm std
+    float rot_var   = 1e-6f;                        // ~0.057° std
+    Vector6 << rot_var, rot_var, rot_var, trans_var, trans_var, trans_var;
     gtsam::noiseModel::Diagonal::shared_ptr constraintNoise = gtsam::noiseModel::Diagonal::Variances(Vector6);
-    std::cout << "loopNoiseQueue   =   " << noiseScore << std::endl;
+    // 详细 log: 闭哪两个 KF + ICP 出的相对 z 差 + 时间差
+    float dz_icp = correctionLidarFrame(2, 3);
+    float dt_kf = (copy_cloudKeyPoses6D->points[loopKeyCur].time - copy_cloudKeyPoses6D->points[loopKeyPre].time);
+    std::cout << "LOOP cur=" << loopKeyCur << " <-> pre=" << loopKeyPre
+              << "  dt=" << dt_kf << "s"
+              << "  fitness=" << noiseScore
+              << "  dz_correction=" << dz_icp
+              << "  curZ=" << copy_cloudKeyPoses6D->points[loopKeyCur].z
+              << " preZ=" << copy_cloudKeyPoses6D->points[loopKeyPre].z
+              << std::endl;
 
     // 添加闭环因子需要的数据
     mtx.lock();

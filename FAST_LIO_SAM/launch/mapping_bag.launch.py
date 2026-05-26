@@ -13,7 +13,7 @@ fast-lio-sam rosbag2 回放建图 launch (任意 ROS2 LiDAR bag).
 用法:
   ros2 launch fast_lio_sam mapping_bag.launch.py \\
       bag:=/path/to/rosbag2_dir \\
-      config_file:=/path/to/airy_via_bridge.yaml \\
+      config_file:=/path/to/airy_test_no_extr_est.yaml \\
       stop_service:=airy-lidar.service \\
       rate:=1.0
 

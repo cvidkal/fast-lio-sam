@@ -32,7 +32,7 @@ def generate_launch_description():
     )
     arg_config = DeclareLaunchArgument(
         'config_file', default_value=default_cfg,
-        description='YAML 配置 (可换 mid360.yaml / airy.yaml 等)'
+        description='YAML 配置 (可换 mid360.yaml / airy_test_no_extr_est.yaml 等)'
     )
     arg_rviz = DeclareLaunchArgument(
         'rviz', default_value='true',

@@ -197,12 +197,34 @@ void ImuProcess::IMU_init(const MeasureGroup& meas, esekfom::esekf<state_ikfom, 
         N++;
     }
     state_ikfom init_state = kf_state.get_x();  // 初始状态量
-    init_state.grav = S2(-mean_acc / mean_acc.norm() *
-                         G_m_s2);  // - acc * (g / acc)，负值，根据加速度均值，重力模长做归一化，重力记为S2流形
-    // init_state.grav = S2(V3D(0, 0, -1)*G_m_s2);
-
-    // init_state.rot = Exp(mean_acc.cross(V3D(0, 0, -1 / G_m_s2))).inverse();
-    // init_state.rot = GetRotByAlignVector(mean_acc, V3D(0, 0, -1));
+    // 让 world frame 用标准 z-up 约定 (跟 ROS / RViz / Nav2 一致, 不受 IMU 装反影响).
+    // 旧做法: init.rot=I, grav=-mean_acc/|mean_acc|*G; 直接继承 IMU body 方向, IMU 装反时 world +z 朝下.
+    // 新做法: 构造 init.rot 把 body 的"anti-gravity 方向" (=静止时 acc 方向) 旋到 world (0,0,+1);
+    //         grav 固定 (0,0,-G), 标准 z-up. EKF 数学等价但输出系是 z-up.
+    {
+        V3D up_body = mean_acc.normalized();   // 静止时 acc reading = -gravity_body = world +z direction in body frame
+        V3D z_world(0, 0, 1);
+        V3D axis = up_body.cross(z_world);
+        double s_axis = axis.norm();
+        double c_axis = up_body.dot(z_world);
+        M3D R_init;
+        if (s_axis < 1e-9) {
+            // up_body 已经跟 z_world 同向或反向
+            if (c_axis > 0)
+                R_init = M3D::Identity();
+            else
+                R_init = (M3D() << 1, 0, 0, 0, -1, 0, 0, 0, -1).finished();  // 180° around x
+        } else {
+            axis /= s_axis;
+            M3D K;
+            K <<      0,  -axis(2),   axis(1),
+                 axis(2),         0,  -axis(0),
+                -axis(1),   axis(0),         0;
+            R_init = M3D::Identity() + s_axis * K + (1 - c_axis) * (K * K);
+        }
+        init_state.rot = SO3(R_init);
+        init_state.grav = S2(V3D(0, 0, -G_m_s2));  // 标准 z-up
+    }
     init_state.bg = mean_gyr;                   // 初始化陀螺仪bias（初值？）为平均角速度
     init_state.offset_T_L_I = Lidar_T_wrt_IMU;  //   t_lidar_imu  translate外参
     init_state.offset_R_L_I = Lidar_R_wrt_IMU;  //   R_lidar_imu rotation 外参
