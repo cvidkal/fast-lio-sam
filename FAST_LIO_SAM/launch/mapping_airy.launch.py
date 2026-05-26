@@ -8,7 +8,7 @@ fast-lio-sam 实时建图 launch (RoboSense Airy, 原生 PointXYZIRT 路径).
 
   # bag 回放 (use mapping_bag.launch.py instead):
   ros2 launch fast_lio_sam mapping_bag.launch.py \\
-       bag:=<path> config_file:=<...>/airy.yaml
+       bag:=<path> config_file:=<...>/airy_test_no_extr_est.yaml
 """
 import os
 
@@ -23,7 +23,7 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     pkg_share = get_package_share_directory('fast_lio_sam')
-    default_cfg = os.path.join(pkg_share, 'config', 'airy.yaml')
+    default_cfg = os.path.join(pkg_share, 'config', 'airy_test_no_extr_est.yaml')
     default_rviz = os.path.join(pkg_share, 'rviz_cfg', 'fastlio_hk.rviz')
 
     arg_use_sim_time = DeclareLaunchArgument(
@@ -32,7 +32,7 @@ def generate_launch_description():
     )
     arg_config = DeclareLaunchArgument(
         'config_file', default_value=default_cfg,
-        description='YAML 配置 (默认 airy.yaml)'
+        description='YAML 配置 (默认 airy_test_no_extr_est.yaml, 含真实 IMU↔LiDAR 外参)'
     )
     arg_rviz = DeclareLaunchArgument(
         'rviz', default_value='true',
