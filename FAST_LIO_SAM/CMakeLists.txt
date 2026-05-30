@@ -62,6 +62,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   srv/SavePose.srv
   srv/SetInitPose.srv
   srv/Relocalize.srv
+  srv/MappingControl.srv
   DEPENDENCIES
     builtin_interfaces
     std_msgs
