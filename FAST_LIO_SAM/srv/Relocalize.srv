@@ -1,0 +1,17 @@
+# 用户面: 触发一次重定位.
+# init_pose_service (Python 节点) 实现, 内部:
+#   1. 取最近 ~2s 的 LiDAR + IMU buffer
+#   2. IMU 平均 acc -> gravity -> 锁 roll/pitch (若 use_imu_gravity)
+#   3. 若 hint 非零: 局部 GICP 在 hint ± search_radius 内
+#      若 hint 全零: 全局 RANSAC+FPFH 然后 GICP 精修
+#   4. push_to_fastlio == true 时, 调 fastlio_mapping 的 /set_init_pose 写回
+geometry_msgs/Pose hint           # 可选 initial guess (全 0 = 不 hint, 走全局)
+float64 search_radius             # hint 非零时的局部搜索半径 (m), 默认 5.0
+bool    use_imu_gravity           # true = IMU 锁 roll/pitch, 重定位降到 4 DOF
+bool    push_to_fastlio           # true = 算完自动调 /set_init_pose; false = 只返回 pose
+---
+bool                              success
+geometry_msgs/PoseWithCovariance  pose      # 结果 pose + 6x6 covariance (xyz/rpy)
+float64                           fitness   # GICP fitness (越高越好, 0..1)
+float64                           rmse      # GICP inlier RMSE (m)
+string                            message

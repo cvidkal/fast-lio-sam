@@ -1,0 +1,8 @@
+# 把外部算出来的 init pose 注入 fastlio_mapping 的 IKF state.
+# 调用者: init_pose_service (Python) 或人工 (RViz / CLI).
+# 调用前提: localization.mode == true. mapping mode 下会拒绝.
+geometry_msgs/Pose pose          # 在 bag1 prior map frame ("camera_init") 下
+float64 score                    # 来源算法的 fitness (0..1), 0 = unknown / 不评分
+---
+bool   success
+string message                   # 失败原因 (e.g. "mapping mode active, refused"), 或 "ok"

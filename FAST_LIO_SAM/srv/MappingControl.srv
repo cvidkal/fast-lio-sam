@@ -1,0 +1,16 @@
+# 建图控制 service: 让外部 (CLI / 上层调度) 控制建图节点运行.
+# command (大小写不敏感):
+#   PAUSE   - 暂停建图: 丢弃新进来的 LiDAR scan, 已建地图/关键帧/轨迹保留不变
+#   RESUME  - 恢复建图: 继续处理新 scan
+#   STOP    - 暂停并落盘: 等价 PAUSE + 调 /save_map 逻辑 (写 PCD + 关键帧位姿)
+#   STATUS  - 只查询当前状态, 不改变任何状态
+# 注: 不支持运行中"清空重建". 要开一段全新的图请重启节点.
+string  command
+float32 resolution      # 仅 STOP: 保存地图下采样分辨率 (m), <=0 用 yaml 默认
+string  destination     # 仅 STOP: 保存目录 (相对 $HOME), 空用 yaml 默认
+---
+bool    success
+string  state           # 执行后状态: "mapping" 或 "paused"
+int32   keyframe_count  # 当前 PGO 关键帧数
+int32   path_points     # 当前轨迹点数
+string  message         # 人类可读结果 / 失败原因

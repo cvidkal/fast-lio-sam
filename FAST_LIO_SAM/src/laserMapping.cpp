@@ -97,6 +97,7 @@
 // save map
 #include "fast_lio_sam/srv/save_map.hpp"
 #include "fast_lio_sam/srv/save_pose.hpp"
+#include "fast_lio_sam/srv/mapping_control.hpp"
 
 // save data in kitti format
 #include <filesystem>
@@ -229,6 +230,9 @@ double mappingProcessInterval;
 
 /*loop clousre*/
 bool startFlag = true;
+// 建图控制门控: false = 暂停 (主循环丢弃新 scan, 已建地图/关键帧/轨迹保留).
+// 由 /mapping_control service 翻转. 回调与主循环读者同在 spin_some 线程, 无需加锁.
+bool mapping_active = true;
 bool loopClosureEnableFlag;
 float loopClosureFrequency;  //   回环检测频率
 int surroundingKeyframeSize;
@@ -321,6 +325,7 @@ float globalMapVisualizationLeafSize;
 // saveMap
 rclcpp::Service<fast_lio_sam::srv::SaveMap>::SharedPtr srvSaveMap;
 rclcpp::Service<fast_lio_sam::srv::SavePose>::SharedPtr srvSavePose;
+rclcpp::Service<fast_lio_sam::srv::MappingControl>::SharedPtr srvMappingControl;
 bool savePCD;             // 是否保存地图
 string savePCDDirectory;  // 保存路径
 
@@ -719,16 +724,35 @@ void saveKeyFramesAndFactor() {
     addGPSFactor();
     // 闭环因子 (rs-loop-detect)  基于欧氏距离的检测
     addLoopFactor();
-    // 执行优化
-    isam->update(gtSAMgraph, initialEstimate);
-    isam->update();
-    if (aLoopIsClosed == true)  // 有回环因子，多update几次
-    {
+    // 执行优化.
+    // 静止段 / 退化运动下, GTSAM 可能抛 IndeterminantLinearSystemException
+    // (因子图欠定). 这是 SAM 算法本性, 不是 bug. 抓住别让整个进程 abort,
+    // 跳过这一次 update, 等下一帧有运动再恢复.
+    try {
+        isam->update(gtSAMgraph, initialEstimate);
         isam->update();
-        isam->update();
-        isam->update();
-        isam->update();
-        isam->update();
+        if (aLoopIsClosed == true)  // 有回环因子，多update几次
+        {
+            isam->update();
+            isam->update();
+            isam->update();
+            isam->update();
+            isam->update();
+        }
+    } catch (const gtsam::IndeterminantLinearSystemException& e) {
+        RCLCPP_WARN(rclcpp::get_logger("fastlio_mapping"),
+                    "ISAM2 update underdetermined (likely stationary segment), "
+                    "skipping this keyframe optimization: %s", e.what());
+        gtSAMgraph.resize(0);
+        initialEstimate.clear();
+        // 这一帧不加进 cloudKeyPoses6D, 下一帧重试
+        return;
+    } catch (const std::exception& e) {
+        RCLCPP_ERROR(rclcpp::get_logger("fastlio_mapping"),
+                     "ISAM2 update unexpected exception: %s", e.what());
+        gtSAMgraph.resize(0);
+        initialEstimate.clear();
+        return;
     }
     // update之后要清空一下保存的因子图，注：历史数据不会清掉，ISAM保存起来了
     gtSAMgraph.resize(0);
@@ -1922,6 +1946,54 @@ void saveMap() {
     }
 }
 
+// 建图控制 service: PAUSE / RESUME / STOP / STATUS.
+// 回调在主循环线程 (rclcpp::spin_some) 同步执行, 与读 mapping_active 的主循环同线程, 无需加锁.
+// STOP 复用 saveMapService, 其对 cloudKeyPoses/surfCloudKeyFrames 的并发情况与现有 /save_map 完全一致.
+void mappingControlService(const std::shared_ptr<fast_lio_sam::srv::MappingControl::Request> req,
+                           std::shared_ptr<fast_lio_sam::srv::MappingControl::Response> res) {
+    std::string cmd = req->command;
+    for (auto& c : cmd) {
+        if (c >= 'a' && c <= 'z') c = static_cast<char>(c - ('a' - 'A'));
+    }
+
+    res->success = true;
+    if (cmd == "PAUSE") {
+        mapping_active = false;
+        res->message = "mapping paused";
+    } else if (cmd == "RESUME") {
+        mapping_active = true;
+        res->message = "mapping resumed";
+    } else if (cmd == "STOP") {
+        mapping_active = false;
+        auto sreq = std::make_shared<fast_lio_sam::srv::SaveMap::Request>();
+        sreq->resolution = req->resolution > 0.0f ? req->resolution : 0.0f;
+        sreq->destination = req->destination;
+        auto sres = std::make_shared<fast_lio_sam::srv::SaveMap::Response>();
+        try {
+            saveMapService(sreq, sres);
+            res->success = sres->success;
+            res->message = sres->success ? "mapping stopped and map saved" : "mapping stopped but map save failed";
+        } catch (const std::exception& e) {
+            res->success = false;
+            res->message = std::string("mapping stopped but save threw: ") + e.what();
+        }
+    } else if (cmd == "STATUS") {
+        res->message = "ok";
+    } else {
+        res->success = false;
+        res->message = "unknown command '" + req->command + "' (use PAUSE / RESUME / STOP / STATUS)";
+    }
+
+    res->state = mapping_active ? "mapping" : "paused";
+    res->keyframe_count = static_cast<int32_t>(cloudKeyPoses3D->points.size());
+    res->path_points = static_cast<int32_t>(globalPath.poses.size());
+
+    RCLCPP_INFO(rclcpp::get_logger("fastlio_mapping"),
+                "/mapping_control [%s] -> success=%d state=%s keyframes=%d path=%d",
+                cmd.c_str(), static_cast<int>(res->success), res->state.c_str(),
+                res->keyframe_count, res->path_points);
+}
+
 /**
  * 发布局部关键帧map的特征点云
  */
@@ -2384,6 +2456,9 @@ int main(int argc, char** argv) {
     srvSaveMap  = node->create_service<fast_lio_sam::srv::SaveMap>("/save_map", &saveMapService);
     // savePose
     srvSavePose = node->create_service<fast_lio_sam::srv::SavePose>("/save_pose", &savePoseService);
+    // mappingControl: PAUSE / RESUME / STOP / STATUS
+    srvMappingControl =
+        node->create_service<fast_lio_sam::srv::MappingControl>("/mapping_control", &mappingControlService);
 
     // 回环检测线程
     std::thread loopthread(&loopClosureThread);
@@ -2406,6 +2481,14 @@ int main(int argc, char** argv) {
 
         /// 在Measure内，储存当前lidar数据及lidar扫描时间内对应的imu数据序列
         if (sync_packages(Measures)) {
+            // 建图控制: 暂停时丢弃这帧, 不更新地图 (已建关键帧/轨迹保留). 见 /mapping_control.
+            if (!mapping_active) {
+                if (data_mode == 1) {
+                    main_loop_flag = 1;
+                    sig_main_loop_finished.notify_all();
+                }
+                continue;
+            }
             // 第一帧lidar数据
             if (flg_first_scan) {
                 first_lidar_time = Measures.lidar_beg_time;  // 记录第一帧绝对时间
@@ -2559,7 +2642,7 @@ int main(int argc, char** argv) {
             if (scan_pub_en || pcd_save_en) publish_frame_world(pubLaserCloudFull);           //   发布world系下的点云
             if (scan_pub_en && scan_body_pub_en) publish_frame_body(pubLaserCloudFull_body);  //  发布imu系下的点云
 
-            // if(savePCD)  saveMap();
+            // 注意: savePCD 在退出循环后才调用 (line ~2645), 否则每帧都 saveMap 会卡死.
 
             // publish_effect_world(pubLaserCloudEffect);
             // publish_map(pubLaserCloudMap);
@@ -2658,6 +2741,19 @@ int main(int argc, char** argv) {
 
     startFlag = false;
     loopthread.join();  //  分离线程
+
+    // 落 PGO 修正后的全局地图.
+    // 没这一段时, 退出前只有 main loop 里 pcl_wait_save 累积的 "前端 IEKF 状态下" 的
+    // 点云被存为 PCD/scans.pcd; 而 SAM/PGO 后端的回环修正只反映在 cloudKeyPoses6D 里,
+    // 不会落盘. 现在 SIGINT 退出 (loopthread.join() 之后, 保证 PGO 状态稳定) 时
+    // 调用 saveMap() 一次, 把修正过的 GlobalMap.pcd 等输出到 $HOME/<savePCDDirectory>.
+    if (savePCD) {
+        try {
+            saveMap();
+        } catch (const std::exception& e) {
+            RCLCPP_ERROR(rclcpp::get_logger("fastlio_mapping"), "saveMap on shutdown failed: %s", e.what());
+        }
+    }
 
     // ROS2 移植析构顺序修复:
     // 局部 `node` (line 2130) 在 main return 时先析构, 但下面这些全局 SharedPtr 持有
