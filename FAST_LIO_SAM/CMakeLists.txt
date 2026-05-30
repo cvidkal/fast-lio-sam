@@ -60,6 +60,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   msg/Pose6D.msg
   srv/SaveMap.srv
   srv/SavePose.srv
+  srv/SetInitPose.srv
+  srv/Relocalize.srv
   DEPENDENCIES
     builtin_interfaces
     std_msgs

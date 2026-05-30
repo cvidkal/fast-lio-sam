@@ -1,0 +1,111 @@
+# RoboSense Airy 96 - 定位模式 (基于 airy_real_ext.yaml).
+# 用 prior map (bag1 建好的 PCD) 做 scan-to-map 跟踪, 不再建图.
+#
+# 与 airy_real_ext.yaml 的关键区别:
+#   - localization.mode: true            # 打开定位模式
+#   - localization.prior_map: <PCD>      # 必填: bag1 建出来的 GlobalMap.pcd 路径
+#   - localization.init_pos_xyz / quat   # 首帧 pose 注入 (Day 1 用 identity; Day 2 起由 init-pose 模块算)
+#   - loopClosureEnableFlag: false       # 静态地图不做 PGO loop closure
+#   - recontructKdTree: false            # 永不重建 ikd-Tree
+#   - pcd_save_en / savePCD: false       # 不再落 GlobalMap.pcd, prior map 本身就是
+/**:
+  ros__parameters:
+    publish:
+      path_en: true
+      scan_publish_en: true
+      dense_publish_en: true
+      scan_bodyframe_pub_en: false
+
+    common:
+      lid_topic: "/rslidar_points"
+      imu_topic: "/rslidar_imu_data"
+      time_sync_en: false
+      data_mode: 0
+      bag_path: ""
+      gnss_topic: "/gps/fix"
+
+    preprocess:
+      blind: 0.5
+      lidar_type: 5
+      scan_line: 96
+      scan_rate: 10
+      livox_type: 1
+
+    mapping:
+      acc_cov: 0.1
+      gyr_cov: 0.1
+      b_acc_cov: 0.0001
+      b_gyr_cov: 0.0001
+      fov_degree: 360.0
+      det_range: 60.0
+      extrinsic_est_en: false           # 定位模式锁外参, 不在线估计
+      extrinsic_T: [0.00425, 0.00418, -0.00446]
+      extrinsic_R: [-0.006915, -0.999975,  0.001559,
+                    -0.999950,  0.006903, -0.007273,
+                     0.007262, -0.001609, -0.999972]
+      extrinR_Gnss2Lidar: [1.0, 0.0, 0.0,
+                           0.0, 1.0, 0.0,
+                           0.0, 0.0, 1.0]
+
+    pcd_save:
+      pcd_save_en: false                # 定位模式不存"自建地图", prior map 才是
+      interval: -1
+
+    feature_extract_enable: false
+    point_filter_num: 4
+    max_iteration: 4
+    filter_size_corner: 0.3
+    filter_size_surf: 0.3
+    filter_size_map: 0.3
+    cube_side_length: 1000.0
+    runtime_pos_log_enable: false
+    map_file_path: ""
+
+    odometrySurfLeafSize: 0.2
+    mappingCornerLeafSize: 0.1
+    mappingSurfLeafSize: 0.2
+    z_tollerance: 1000.0
+    rotation_tollerance: 1000.0
+
+    numberOfCores: 4
+    mappingProcessInterval: 0.15
+
+    surroundingkeyframeAddingDistThreshold: 1.0
+    surroundingkeyframeAddingAngleThreshold: 0.2
+    surroundingKeyframeDensity: 2.0
+    surroundingKeyframeSearchRadius: 50.0
+
+    loopClosureEnableFlag: false        # 定位模式: 静态地图不做 loop closure (代码会再强制一次)
+    loopClosureFrequency: 1.0
+    surroundingKeyframeSize: 50
+    historyKeyframeSearchRadius: 15.0
+    historyKeyframeSearchTimeDiff: 30.0
+    historyKeyframeSearchNum: 25
+    historyKeyframeFitnessScore: 0.3
+
+    useImuHeadingInitialization: false
+    useGpsElevation: false
+    gpsCovThreshold: 2.0
+    poseCovThreshold: 25.0
+
+    globalMapVisualizationSearchRadius: 1000.0
+    globalMapVisualizationPoseDensity: 10.0
+    globalMapVisualizationLeafSize: 1.0
+
+    visulize_IkdtreeMap: false
+    recontructKdTree: false             # 定位模式: 永不重建 ikd-Tree
+
+    savePCD: false                      # 同 pcd_save_en, 静态地图不重存
+    savePCDDirectory: "/Downloads/LOAM_localization/"
+
+    # ====== Localization mode (Day 1) ======
+    # mode: true   开定位模式
+    # prior_map:   必填. bag1 建好的 GlobalMap.pcd (推荐 gravity-aligned 版)
+    # init_pos_xyz / init_rot_quat:  首帧 IKF 状态注入.
+    #   Day 1 默认 identity = bag2 的 t0 LiDAR origin 与 prior map 原点重合, yaw=0.
+    #   Day 2 起由 init-pose 模块 (IMU gravity + RANSAC+FPFH + GICP) 自动算出真值覆盖.
+    localization:
+      mode: true
+      prior_map: "/home/chenguojun/Downloads/LOAM_173924/aligned/GlobalMap.pcd"
+      init_pos_xyz:  [0.0, 0.0, 0.0]
+      init_rot_quat: [0.0, 0.0, 0.0, 1.0]   # x, y, z, w
