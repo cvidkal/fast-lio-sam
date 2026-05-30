@@ -719,16 +719,35 @@ void saveKeyFramesAndFactor() {
     addGPSFactor();
     // 闭环因子 (rs-loop-detect)  基于欧氏距离的检测
     addLoopFactor();
-    // 执行优化
-    isam->update(gtSAMgraph, initialEstimate);
-    isam->update();
-    if (aLoopIsClosed == true)  // 有回环因子，多update几次
-    {
+    // 执行优化.
+    // 静止段 / 退化运动下, GTSAM 可能抛 IndeterminantLinearSystemException
+    // (因子图欠定). 这是 SAM 算法本性, 不是 bug. 抓住别让整个进程 abort,
+    // 跳过这一次 update, 等下一帧有运动再恢复.
+    try {
+        isam->update(gtSAMgraph, initialEstimate);
         isam->update();
-        isam->update();
-        isam->update();
-        isam->update();
-        isam->update();
+        if (aLoopIsClosed == true)  // 有回环因子，多update几次
+        {
+            isam->update();
+            isam->update();
+            isam->update();
+            isam->update();
+            isam->update();
+        }
+    } catch (const gtsam::IndeterminantLinearSystemException& e) {
+        RCLCPP_WARN(rclcpp::get_logger("fastlio_mapping"),
+                    "ISAM2 update underdetermined (likely stationary segment), "
+                    "skipping this keyframe optimization: %s", e.what());
+        gtSAMgraph.resize(0);
+        initialEstimate.clear();
+        // 这一帧不加进 cloudKeyPoses6D, 下一帧重试
+        return;
+    } catch (const std::exception& e) {
+        RCLCPP_ERROR(rclcpp::get_logger("fastlio_mapping"),
+                     "ISAM2 update unexpected exception: %s", e.what());
+        gtSAMgraph.resize(0);
+        initialEstimate.clear();
+        return;
     }
     // update之后要清空一下保存的因子图，注：历史数据不会清掉，ISAM保存起来了
     gtSAMgraph.resize(0);
@@ -2559,7 +2578,7 @@ int main(int argc, char** argv) {
             if (scan_pub_en || pcd_save_en) publish_frame_world(pubLaserCloudFull);           //   发布world系下的点云
             if (scan_pub_en && scan_body_pub_en) publish_frame_body(pubLaserCloudFull_body);  //  发布imu系下的点云
 
-            // if(savePCD)  saveMap();
+            // 注意: savePCD 在退出循环后才调用 (line ~2645), 否则每帧都 saveMap 会卡死.
 
             // publish_effect_world(pubLaserCloudEffect);
             // publish_map(pubLaserCloudMap);
@@ -2658,6 +2677,19 @@ int main(int argc, char** argv) {
 
     startFlag = false;
     loopthread.join();  //  分离线程
+
+    // 落 PGO 修正后的全局地图.
+    // 没这一段时, 退出前只有 main loop 里 pcl_wait_save 累积的 "前端 IEKF 状态下" 的
+    // 点云被存为 PCD/scans.pcd; 而 SAM/PGO 后端的回环修正只反映在 cloudKeyPoses6D 里,
+    // 不会落盘. 现在 SIGINT 退出 (loopthread.join() 之后, 保证 PGO 状态稳定) 时
+    // 调用 saveMap() 一次, 把修正过的 GlobalMap.pcd 等输出到 $HOME/<savePCDDirectory>.
+    if (savePCD) {
+        try {
+            saveMap();
+        } catch (const std::exception& e) {
+            RCLCPP_ERROR(rclcpp::get_logger("fastlio_mapping"), "saveMap on shutdown failed: %s", e.what());
+        }
+    }
 
     // ROS2 移植析构顺序修复:
     // 局部 `node` (line 2130) 在 main return 时先析构, 但下面这些全局 SharedPtr 持有
