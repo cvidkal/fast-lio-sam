@@ -90,8 +90,14 @@ def fit_plane_ransac(
     n_iter: int = 500,
     inlier_thresh: float = 0.05,
     seed: int = 42,
+    min_normal_z: float = 0.7,
 ) -> tuple[np.ndarray, float, int]:
-    """RANSAC 拟合平面, 返回 (法向 n, d, 内点数). n 已归一化, 默认指向 +z."""
+    """RANSAC 拟合平面, 返回 (法向 n, d, 内点数). n 已归一化, 默认指向 +z.
+
+    min_normal_z: 只接受法向近竖直 (|n_z| >= 该值) 的平面. 防止在室内把竖直墙面
+    当地面 — "最低 20% z" 的地面候选带里, 长墙的底部点往往比地面点还多, 纯"最大
+    内点平面" RANSAC 会锁到墙 (法向水平), 再翻成 +z 得到 ~86° 的假地面, 把整张图
+    旋歪. 地面残留倾斜一般只有几度, 默认 0.7 (允许到 45°) 极安全且能干净拒绝墙."""
     rng = np.random.default_rng(seed)
     best_inl = 0
     best = None
@@ -103,6 +109,8 @@ def fit_plane_ransac(
         if nn < 1e-6:
             continue
         n /= nn
+        if abs(float(n[2])) < min_normal_z:
+            continue  # 不是近水平面 (地面), 跳过 — 拒绝墙/家具立面
         d = -n @ p1
         dist = np.abs(pts @ n + d)
         inl = (dist < inlier_thresh).sum()
@@ -110,7 +118,10 @@ def fit_plane_ransac(
             best_inl = inl
             best = (n.copy(), float(d))
     if best is None:
-        raise RuntimeError("RANSAC 找不到平面")
+        raise RuntimeError(
+            f"RANSAC 找不到近水平地面 (|n_z| >= {min_normal_z}). "
+            f"点云可能没 z-up, 或地面候选带里全是墙 — 试 --floor-z-range 手动缩小地面 z 区间."
+        )
     n, d = best
     if n[2] < 0:
         n, d = -n, -d

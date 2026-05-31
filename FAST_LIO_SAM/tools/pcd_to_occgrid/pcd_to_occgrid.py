@@ -329,6 +329,80 @@ def _bresenham_mark(x0: int, y0: int, x1: int, y1: int, out: np.ndarray) -> None
 
 
 # ============================================================
+# Footprint exclusion: 扔掉切片里"贴近任一 keyframe"的点.
+#
+# 手持采集时操作员身体 (脚/胸/肩/背包) 或机器狗机身在 LiDAR 视野里, 投影到 2D 后
+# 变成贴着轨迹的"鬼墙". 这些点的特征: 在切片高度内, 且**始终离 trajectory 很近**
+# (附着在传感器上, 全程跟着走). 真墙离最近 keyframe 一般有 ~0.3m+. 简单全局启发:
+# 把"距最近 KF < radius"的切片点删掉. 推荐手持 0.3m, 机器狗 0.4m.
+#
+# 注: per-scan 的精确版见 tools/footprint_filter/ (在传感器局部系按外参切, 不依赖
+#     全局最近邻). 此处是轻量全局版, 给 build_2d_map 默认 profile 用.
+# ============================================================
+def exclude_footprint(
+    points_xyz: np.ndarray,
+    traj_xy: np.ndarray,
+    radius: float,
+) -> np.ndarray:
+    """从 points_xyz 中扔掉离任一 keyframe (xy) 距离 < radius 的点."""
+    if radius <= 0 or len(traj_xy) == 0:
+        return points_xyz
+    try:
+        from scipy.spatial import cKDTree
+    except ImportError:
+        keep = np.ones(len(points_xyz), dtype=bool)
+        for kf in traj_xy:
+            d = np.hypot(points_xyz[:, 0] - kf[0], points_xyz[:, 1] - kf[1])
+            keep &= d >= radius
+        return points_xyz[keep]
+    tree = cKDTree(traj_xy)
+    nearest_dist, _ = tree.query(points_xyz[:, :2], k=1)
+    return points_xyz[nearest_dist >= radius]
+
+
+# ============================================================
+# Auto-crop: 把网格四周"全 unknown"的边裁掉, 只保留有信息 (occ/free) 的区域.
+#
+# 为什么需要: project_to_grid 用 *完整点云* 的 xy extent 定网格大小, 但只有 z 切片
+# 后的点 (障碍) + floor 层 / raycast (free) 才会被真正标注. 机器狗在室内透过门窗能
+# 看到 ~30m 外的真实远点 (z 多落在切片外), 这些点把网格撑到几十米, 而 occ/free 只占
+# 一角 -> 输出图 90%+ 是 unknown 空白边 (实测 dog bag: 43x35m / unknown 96.2%).
+#
+# 裁到 (occ ∪ free) 的包围盒 + pad 边距即可: 不丢任何信息 (外面本就全 unknown),
+# 内部被墙包住的 unknown 也原样保留 (只裁外框). origin 按裁剪量同步平移.
+# 注意: 此处 grid 行号 iy = (y - y_min)/res, 即 row 0 = y_min (世界系下边),
+#       origin(x_min,y_min) 落在 (row=0, col=0), 所以裁剪后:
+#         new_x_min = x_min + c0*res ;  new_y_min = y_min + r0*res
+#       (PGM 的上下翻转在 save_map 里做, 这里仍是世界系正向, 不用管翻转.)
+# ============================================================
+def autocrop_unknown_border(
+    grid: np.ndarray,
+    origin_xy: tuple[float, float],
+    resolution: float,
+    pad_m: float = 0.5,
+) -> tuple[np.ndarray, tuple[float, float]]:
+    """裁掉全 unknown(255) 的外边. grid 内部约定: 0=free,100=occ,255=unknown."""
+    content = grid != 255
+    if not content.any():
+        print('[WARN] autocrop: 整张图都是 unknown, 跳过裁剪')
+        return grid, origin_xy
+    H, W = grid.shape
+    ys, xs = np.where(content)
+    r0, r1 = int(ys.min()), int(ys.max()) + 1
+    c0, c1 = int(xs.min()), int(xs.max()) + 1
+    pad = int(round(max(0.0, pad_m) / resolution))
+    r0 = max(0, r0 - pad); c0 = max(0, c0 - pad)
+    r1 = min(H, r1 + pad); c1 = min(W, c1 + pad)
+    cropped = grid[r0:r1, c0:c1]
+    new_origin = (origin_xy[0] + c0 * resolution,
+                  origin_xy[1] + r0 * resolution)
+    print(f'[INFO] autocrop: {W}x{H} -> {cropped.shape[1]}x{cropped.shape[0]} px '
+          f'(pad {pad_m}m), origin {origin_xy[0]:.2f},{origin_xy[1]:.2f} '
+          f'-> {new_origin[0]:.2f},{new_origin[1]:.2f}')
+    return cropped, new_origin
+
+
+# ============================================================
 # 写出 nav2 兼容的 PGM + YAML
 # ============================================================
 def save_map(
@@ -407,6 +481,19 @@ def main() -> int:
                    help='检测到多层时报错并退出 (默认仅 warn 后继续, 但结果不可信).')
     p.add_argument('--dilate', type=int, default=1,
                    help='障碍膨胀次数 (默认 1, 给 nav2 留点 inflation 缓冲)')
+    p.add_argument('--footprint-radius', type=float, default=0.0, metavar='METERS',
+                   help='全局 footprint 排除半径 m (默认 0=关). >0 时把切片内"距最近 '
+                        'keyframe < radius"的点删掉, 抑制操作员身体/机身投影成的鬼墙. '
+                        '需要 --raycast 或 --trajectory 提供 KF 位置. 手持 0.3, 狗 0.4. '
+                        '精确 per-scan 版见 tools/footprint_filter/.')
+    p.add_argument('--trajectory', metavar='TRAJ_PCD', default=None,
+                   help='trajectory.pcd 路径, 仅用于 --footprint-radius 但不跑 raycast 时. '
+                        '跟 --raycast 二选一, --raycast 时自动复用其轨迹.')
+    p.add_argument('--no-crop', action='store_true',
+                   help='不裁剪. 默认会把四周全 unknown 的空白边自动裁掉 '
+                        '(见 autocrop_unknown_border). 加此项保留完整点云 extent.')
+    p.add_argument('--crop-pad', type=float, default=0.5, metavar='METERS',
+                   help='autocrop 后在内容四周保留的边距 m (默认 0.5).')
     args = p.parse_args()
 
     print(f'[INFO] 加载 PCD: {args.pcd}')
@@ -426,6 +513,24 @@ def main() -> int:
         print(f'       (相对地面 +z_min={args.z_min}, +z_max={args.z_max}, floor_z={args.floor_z})')
     else:
         z_min, z_max, floor_z = args.z_min, args.z_max, args.floor_z
+
+    # footprint exclusion (投影前): 扔掉切片里"贴近任一 KF"的点 (操作员身体/机身鬼墙).
+    # 只动切片层 (z_min~z_max) 的点, 切片外 (floor 层等) 不碰.
+    if args.footprint_radius > 0:
+        traj_path = args.trajectory or args.raycast
+        if not traj_path:
+            print('[ERR] --footprint-radius 需要 --trajectory 或 --raycast 提供 KF 位置',
+                  file=sys.stderr)
+            return 2
+        ft_traj = load_pcd_xyz(traj_path)[:, :2]
+        slice_mask = (xyz[:, 2] >= z_min) & (xyz[:, 2] <= z_max)
+        slice_pts = xyz[slice_mask]
+        non_slice = xyz[~slice_mask]
+        kept = exclude_footprint(slice_pts, ft_traj, args.footprint_radius)
+        print(f'[INFO] footprint exclusion r={args.footprint_radius}m '
+              f'(用 {len(ft_traj)} KF): 切片点 {len(slice_pts):,} -> {len(kept):,} '
+              f'(扔 {len(slice_pts)-len(kept):,})')
+        xyz = np.concatenate([kept, non_slice], axis=0)
 
     print(f'[INFO] 投影到 2D 占据栅格 res={args.resolution} z=[{z_min:.2f},{z_max:.2f}]')
     grid, origin = project_to_grid(
@@ -474,6 +579,10 @@ def main() -> int:
         print(f'       raycast 完成: occupied={n_occ:,}  free={n_free:,}')
 
     grid = morph_clean(grid, dilate_iter=args.dilate)
+    if not args.no_crop:
+        grid, origin = autocrop_unknown_border(
+            grid, origin, args.resolution, pad_m=args.crop_pad,
+        )
     save_map(grid, origin, args.resolution, args.output)
     return 0
 
