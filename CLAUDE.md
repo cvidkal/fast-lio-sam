@@ -90,6 +90,32 @@ libpcl-dev libeigen3-dev libgoogle-glog-dev libgeographic-dev
 ```
 还要 `livox_ros_driver2` 在 ws 里 (msg-only stub 也行, 见 `dog_mapping_ws/src/livox_ros_driver2/`).
 
+### Worktree 下编译/运行 (多分支并行, 必读)
+
+git worktree 给每个分支独立源码树, 但 colcon 的"一个 `ws/src/<包>` + ws 根放
+build/install/log"工作方式跟它冲突。**直接 `cd ~/fls_ws && colcon build` 编的是那个
+写死软链指向的树 (通常是 main), 不是你当前 worktree 改的分支。** 用仓内 helper 让每个
+worktree 自包含 (已验证 2026-05-31: in-place 编 2.5min / EXIT 0, 产物不弄脏 git):
+
+```bash
+# 编当前 worktree (产物落 FAST_LIO_SAM/{build,install,log}, 被 .gitignore 吃掉)
+bin/wt_build.sh                              # Release; 透传额外 colcon 参数, 如 --symlink-install
+# 跑当前 worktree (按分支名 hash 出唯一 ROS_DOMAIN_ID, 自动隔离 DDS, 多分支同时跑不抢 topic)
+bin/wt_run.sh launch fast_lio_sam mapping_bag.launch.py bag:=... config_file:=...
+# 别的终端对同一 worktree 操作 (echo/hz/service call) 前, 先 export wt_run 打印的那行 ROS_DOMAIN_ID
+```
+
+**三条铁律** (不照做 worktree 就会互相污染):
+1. **必须从 `FAST_LIO_SAM/` 里跑 colcon** (helper 已用 `BASH_SOURCE/..` 锁定包根)。
+   在 worktree 根跑产物落根目录 → 那里没 `.gitignore` (它在 `FAST_LIO_SAM/` 里) → 弄脏 git。
+2. **source `~/fls_ws/install` 当 underlay** 白嫖已编好的 `livox_ros_driver2` (唯一非 apt
+   工作区依赖) + apt 依赖。会有一句 `overriding fast_lio_sam` warning, 无害。覆盖路径用 `FLS_UNDERLAY`。
+3. **每个 worktree 唯一 `ROS_DOMAIN_ID`** (helper 自动按分支 hash 到 1..101, 永不为 0 →
+   不撞默认域 0 的 main)。否则 live 跑会抢 `/Odometry` `/rslidar_points`, 触发 `lidar loop back` 雪崩。
+
+注: `legacy/ros1/package.xml` 包名也是 `fast_lio_sam` (catkin 版), 已用 `legacy/COLCON_IGNORE`
+屏蔽整个 `legacy/` 子树, 避免 colcon 撞 duplicate package。
+
 ### LIVE 建图 (Airy, driver 必须先起)
 ```bash
 ros2 launch fast_lio_sam mapping_airy.launch.py
