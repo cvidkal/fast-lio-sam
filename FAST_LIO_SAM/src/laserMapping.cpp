@@ -105,9 +105,13 @@
 #include <iomanip>
 #include <sstream>
 
-// ROS2 port: wrapper/bag_io 依赖内部 lightning 框架 (IMUPtr / Vec3d 等),
-// 暂时禁用. 离线回放用 `ros2 bag play --clock` 即可, 见 launch/*.launch.py.
-// #include "bag_io.h"
+// 离线 bag 直读 (data_mode==1): 不再依赖 `ros2 bag play`, 由 run_offline_bag()
+// 用 rosbag2_cpp::Reader 顺序读 bag 并同步喂给在线回调. wrapper/bag_io 因依赖
+// 内部 lightning 框架 (IMUPtr / Vec3d 等) 仍不编, 本文件内自带轻量 reader.
+#include <rclcpp/serialization.hpp>
+#include <rclcpp/serialized_message.hpp>
+#include <rosbag2_cpp/reader.hpp>
+#include <rosbag2_storage/storage_filter.hpp>
 #include <thread>
 
 // using namespace gtsam;
@@ -1111,6 +1115,8 @@ void SigHandle(int sig) {
     flg_exit = true;
     RCLCPP_WARN(rclcpp::get_logger("fastlio_mapping"), "catch sig %d", sig);
     sig_buffer.notify_all();
+    // 离线模式下 reader 线程可能正阻塞在 lidar 回调的握手 wait 上, 一并唤醒它退出.
+    sig_main_loop_finished.notify_all();
 }
 
 inline void dump_lio_state_to_log(FILE* fp) {
@@ -1279,9 +1285,16 @@ void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::ConstSharedPtr& msg) 
     mtx_buffer.unlock();
 
     if (data_mode == 1) {
+        // 先把本帧的完成标志清零 (reader 线程持 mtx_main_loop), 再通知主循环.
+        // 否则会读到上一帧遗留的 main_loop_flag==1 而跳过 wait, 破坏 lock-step,
+        // 导致 reader 与主循环并发读写 lidar_buffer (sync_packages 无锁读) 而崩溃.
+        {
+            std::unique_lock<std::mutex> lk(mtx_main_loop);
+            main_loop_flag = 0;
+        }
         sig_buffer.notify_all();
         std::unique_lock<std::mutex> lk(mtx_main_loop);
-        sig_main_loop_finished.wait(lk, []() { return main_loop_flag == 1; });
+        sig_main_loop_finished.wait(lk, []() { return main_loop_flag == 1 || flg_exit; });
     }
 }
 
@@ -1321,9 +1334,16 @@ void livox_pcl_cbk(const livox_ros_driver2::msg::CustomMsg::ConstSharedPtr& msg)
     lidar_buffer_flag = 1;
     mtx_buffer.unlock();
     if (data_mode == 1) {
+        // 先把本帧的完成标志清零 (reader 线程持 mtx_main_loop), 再通知主循环.
+        // 否则会读到上一帧遗留的 main_loop_flag==1 而跳过 wait, 破坏 lock-step,
+        // 导致 reader 与主循环并发读写 lidar_buffer (sync_packages 无锁读) 而崩溃.
+        {
+            std::unique_lock<std::mutex> lk(mtx_main_loop);
+            main_loop_flag = 0;
+        }
         sig_buffer.notify_all();
         std::unique_lock<std::mutex> lk(mtx_main_loop);
-        sig_main_loop_finished.wait(lk, []() { return main_loop_flag == 1; });
+        sig_main_loop_finished.wait(lk, []() { return main_loop_flag == 1 || flg_exit; });
     }
 }
 
@@ -1873,9 +1893,19 @@ void saveMapService(const std::shared_ptr<fast_lio_sam::srv::SaveMap::Request> r
     else
         saveMapDirectory = std::getenv("HOME") + req->destination;
     cout << "Save destination: " << saveMapDirectory << endl;
-    // 这个代码太坑了！！注释掉
-    //   int unused = system((std::string("exec rm -r ") + saveMapDirectory).c_str());
-    //   unused = system((std::string("mkdir -p ") + saveMapDirectory).c_str());
+    // pcl::io::savePCDFileBinary 不会自动建父目录: 目标目录不存在时第一次写 (trajectory.pcd)
+    // 就抛 "[pcl::PCDWriter::writeBinary] Error during open!", 整个 saveMap 中止 -> 一张地图都不落盘
+    // (这正是 airy 离线建图 "跑完却没有地图" 的根因). 此前这里连同危险的 `rm -r saveMapDirectory`
+    // 一起被整段注释掉了; rm 不还原 (会误删用户数据), 只显式重建目录.
+    {
+        std::error_code ec;
+        std::filesystem::create_directories(saveMapDirectory, ec);
+        if (ec) {
+            cout << "Failed to create save directory '" << saveMapDirectory << "': " << ec.message() << endl;
+            res->success = false;
+            return;
+        }
+    }
     // 保存历史关键帧位姿
     pcl::io::savePCDFileBinary(saveMapDirectory + "/trajectory.pcd", *cloudKeyPoses3D);       // 关键帧位置
     pcl::io::savePCDFileBinary(saveMapDirectory + "/transformations.pcd", *cloudKeyPoses6D);  // 关键帧位姿
@@ -2203,10 +2233,101 @@ void livox_ros_cbk(const sensor_msgs::msg::PointCloud2::ConstSharedPtr& msg) {
     lidar_buffer_flag = 1;
     mtx_buffer.unlock();  // 解锁
     if (data_mode == 1) {
+        // 先把本帧的完成标志清零 (reader 线程持 mtx_main_loop), 再通知主循环.
+        // 否则会读到上一帧遗留的 main_loop_flag==1 而跳过 wait, 破坏 lock-step,
+        // 导致 reader 与主循环并发读写 lidar_buffer (sync_packages 无锁读) 而崩溃.
+        {
+            std::unique_lock<std::mutex> lk(mtx_main_loop);
+            main_loop_flag = 0;
+        }
         sig_buffer.notify_all();
         std::unique_lock<std::mutex> lk(mtx_main_loop);
-        sig_main_loop_finished.wait(lk, []() { return main_loop_flag == 1; });
+        sig_main_loop_finished.wait(lk, []() { return main_loop_flag == 1 || flg_exit; });
     }
+}
+
+// ============================================================================
+// 离线 bag 直读 (data_mode==1)
+//
+// 用 rosbag2_cpp::Reader 顺序反序列化 bag 内消息, 直接调用与在线订阅一致的回调
+// (standard_pcl_cbk / livox_pcl_cbk / livox_ros_cbk / imu_cbk / gnss_cbk).
+//
+// 为什么不靠 `ros2 bag play`:
+//   - bag play 按实时时钟发布, 消费端 (SLAM) 跟不上时 SensorDataQoS 队列溢出丢帧;
+//   - 这里 lidar 回调内部做 lock-step 握手 (见上方 data_mode==1 分支): reader 喂一帧
+//     就阻塞, 直到主循环处理完该帧才喂下一帧. 因此天然受主循环反压, 零丢帧, 且不受
+//     实时约束 —— 机器快就快跑, 慢就慢跑, 跑满 CPU.
+//
+// 存储后端 (sqlite3 / mcap) 由 reader.open(uri) 依据 metadata 自动识别.
+// ============================================================================
+void run_offline_bag() {
+    rosbag2_cpp::Reader reader;
+    try {
+        reader.open(bag_path);  // 单参重载: 默认存储工厂, 按 metadata 自动识别 sqlite3/mcap
+    } catch (const std::exception& e) {
+        RCLCPP_FATAL(rclcpp::get_logger("fastlio_mapping"), "offline bag: failed to open '%s': %s",
+                     bag_path.c_str(), e.what());
+        flg_exit = true;
+        sig_buffer.notify_all();
+        sig_main_loop_finished.notify_all();
+        return;
+    }
+
+    // 只读用得到的 topic, 跳过相机/tf 等无关消息, 省去无谓反序列化.
+    rosbag2_storage::StorageFilter filter;
+    filter.topics = {lid_topic, imu_topic, gnss_topic};
+    reader.set_filter(filter);
+
+    rclcpp::Serialization<sensor_msgs::msg::PointCloud2> seri_pc2;
+    rclcpp::Serialization<livox_ros_driver2::msg::CustomMsg> seri_livox;
+    rclcpp::Serialization<sensor_msgs::msg::Imu> seri_imu;
+    rclcpp::Serialization<sensor_msgs::msg::NavSatFix> seri_gnss;
+
+    const bool livox_custom = (p_pre->lidar_type == LIVOX && p_pre->livox_type == LIVOX_CUS);
+    size_t n_lidar = 0, n_imu = 0, n_gnss = 0;
+
+    while (rclcpp::ok() && !flg_exit && reader.has_next()) {
+        auto bag_msg = reader.read_next();
+        const std::string& topic = bag_msg->topic_name;
+        rclcpp::SerializedMessage ser(*bag_msg->serialized_data);
+
+        if (topic == imu_topic) {
+            auto m = std::make_shared<sensor_msgs::msg::Imu>();
+            seri_imu.deserialize_message(&ser, m.get());
+            imu_cbk(m);  // 仅缓存, 不参与握手
+            ++n_imu;
+        } else if (topic == lid_topic) {
+            if (livox_custom) {
+                auto m = std::make_shared<livox_ros_driver2::msg::CustomMsg>();
+                seri_livox.deserialize_message(&ser, m.get());
+                livox_pcl_cbk(m);  // 阻塞直到主循环消费完该帧
+            } else {
+                auto m = std::make_shared<sensor_msgs::msg::PointCloud2>();
+                seri_pc2.deserialize_message(&ser, m.get());
+                if (p_pre->lidar_type == LIVOX) {
+                    livox_ros_cbk(m);  // livox 的 PointCloud2 格式
+                } else {
+                    standard_pcl_cbk(m);  // velodyne / ouster 等
+                }
+            }
+            ++n_lidar;
+        } else if (topic == gnss_topic) {
+            auto m = std::make_shared<sensor_msgs::msg::NavSatFix>();
+            seri_gnss.deserialize_message(&ser, m.get());
+            gnss_cbk(m);
+            ++n_gnss;
+        }
+    }
+
+    RCLCPP_WARN(rclcpp::get_logger("fastlio_mapping"),
+                "offline bag finished: lidar=%zu imu=%zu gnss=%zu -> draining last frame & saving PCD",
+                n_lidar, n_imu, n_gnss);
+
+    // 通知主循环 bag 已读完: 它会跳出 sig_buffer.wait, 处理掉缓冲里残留的最后一帧,
+    // 然后 break 进入 saveMap 流程.
+    flg_exit = true;
+    sig_buffer.notify_all();
+    sig_main_loop_finished.notify_all();
 }
 
 int main(int argc, char** argv) {
@@ -2413,13 +2534,15 @@ int main(int argc, char** argv) {
         sub_imu = node->create_subscription<sensor_msgs::msg::Imu>(
             imu_topic, rclcpp::SensorDataQoS().keep_last(200000), imu_cbk);
     } else {
-        // ROS2 port: data_mode==1 (内置 RosbagIO) 暂时禁用. 离线回放请用
-        //   ros2 bag play --clock <bag_dir>
-        // + 同时 launch 这个节点 use_sim_time:=true
-        RCLCPP_FATAL(rclcpp::get_logger("fastlio_mapping"),
-                     "data_mode=1 (built-in bag replay) is disabled in the ROS2 port. "
-                     "Use 'ros2 bag play --clock <bag>' alongside this node instead.");
-        return -1;
+        // data_mode==1: 离线直读 bag, 不建订阅. reader 线程 (run_offline_bag) 在主循环
+        // 就绪后启动, 顺序把消息喂给上面那些回调; 主循环逐帧 lock-step 消费.
+        if (bag_path.empty()) {
+            RCLCPP_FATAL(rclcpp::get_logger("fastlio_mapping"),
+                         "data_mode=1 (offline bag) 需要设置 common.bag_path");
+            return -1;
+        }
+        RCLCPP_INFO(rclcpp::get_logger("fastlio_mapping"),
+                    "offline bag mode: 直接读 '%s' (不依赖 ros2 bag play)", bag_path.c_str());
     }
 
     auto pubLaserCloudFull =
@@ -2465,6 +2588,12 @@ int main(int argc, char** argv) {
 
     //------------------------------------------------------------------------------------------------------
     signal(SIGINT, SigHandle);
+
+    // 离线模式: 主循环已就绪 (发布器/服务/回环线程都建好), 启动 bag reader 线程.
+    if (data_mode == 1) {
+        rosbag_thread = new std::thread(&run_offline_bag);
+    }
+
     rclcpp::Rate rate(5000);
     bool status = rclcpp::ok();
     while (status) {
@@ -2472,11 +2601,11 @@ int main(int argc, char** argv) {
         rclcpp::spin_some(node);
 
         if (data_mode == 1) {
-            // 等待sig_buffer通知
+            // 等待 reader 线程喂入一帧 lidar (或退出信号). main_loop_flag 的清零
+            // 由 lidar 回调 (reader 线程) 负责, 这里不再重置, 避免与回调竞争.
             std::unique_lock<std::mutex> lk(mtx_buffer);
             sig_buffer.wait(lk, []() { return lidar_buffer_flag == 1 || flg_exit; });
             lidar_buffer_flag = 0;
-            main_loop_flag = 0;
         }
 
         /// 在Measure内，储存当前lidar数据及lidar扫描时间内对应的imu数据序列
@@ -2697,6 +2826,14 @@ int main(int argc, char** argv) {
         }
     }
 
+    // 离线模式: 回收 reader 线程. 此处 flg_exit 已为真 (bag 读完或 SIGINT),
+    // reader 要么已自然结束, 要么会被 flg_exit 从握手 wait 中唤醒后退出.
+    if (rosbag_thread) {
+        rosbag_thread->join();
+        delete rosbag_thread;
+        rosbag_thread = nullptr;
+    }
+
     /**************** save map ****************/
     /* 1. make sure you have enough memories
     /* 2. pcd save will largely influence the real-time performences **/
@@ -2769,6 +2906,7 @@ int main(int argc, char** argv) {
     pubOptimizedGlobalMap.reset();
     pubLaserCloudSurround.reset();
     pubGnssPath.reset();
+    srvMappingControl.reset();  // 最后创建, 最先释放. 漏掉它会在退出时 rmw_service.cpp:104 崩
     srvSavePose.reset();
     srvSaveMap.reset();
     g_tf_broadcaster.reset();

@@ -50,7 +50,8 @@ find_package(OpenMP REQUIRED)
 # ----- stage 4 启用 -----
 find_package(GTSAM REQUIRED)              # SAM/PGO 模块 (apt: ros-humble-gtsam, 4.2+)
 find_package(visualization_msgs REQUIRED) # 闭环 marker
-find_package(rosbag2_cpp REQUIRED)        # wrapper/bag_io.cc 离线 bag 回放
+find_package(rosbag2_cpp REQUIRED)        # 离线 bag 直读 (laserMapping.cpp run_offline_bag)
+find_package(rosbag2_storage REQUIRED)    # StorageFilter / 存储后端自动识别 (sqlite3/mcap)
 
 # ============================================================
 # rosidl 接口生成 (msg + srv)
@@ -83,8 +84,9 @@ add_executable(fastlio_mapping
   src/laserMapping.cpp
   src/preprocess.cpp
   include/ikd-Tree/ikd_Tree.cpp
-  # wrapper/bag_io.cc        # 依赖内部 lightning 框架, ROS2 port 暂时不编;
-                             # 离线回放走 `ros2 bag play --clock`
+  # wrapper/bag_io.cc        # 依赖内部 lightning 框架, 不编;
+                             # 离线 bag 直读已内置于 laserMapping.cpp (run_offline_bag,
+                             # data_mode==1), 见 launch/mapping_offline.launch.py
 )
 target_include_directories(fastlio_mapping PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -104,6 +106,7 @@ ament_target_dependencies(fastlio_mapping
   tf2_ros
   tf2_geometry_msgs
   rosbag2_cpp
+  rosbag2_storage
 )
 target_link_libraries(fastlio_mapping
   ${PCL_LIBRARIES}
