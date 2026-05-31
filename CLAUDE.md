@@ -294,6 +294,12 @@ ros2 launch open3d_loc airy_fastlio_loc_cold_start.launch.py rate:=1.0
 
 **rsasaki 路线弃用原因**: NDT_OMP 在 bag1 prior + bag2 scan 上 fitness median 0.6 但对应 RMS ~0.8m, 帧间跳 1-2m. Open3D ICP 同数据 fitness 0.6-0.9 / rmse 0.27m, 是质的差距. 弃用. 留 lidar_localization_ros2 包当 fallback / 参考.
 
+> **2026-05-31 注 (issue #44)**: 建图侧已**移除 HBA 格式输出** (`saveMapDirectory/pcd/` 逐关键帧点云 +
+> `pose.json`). 本段 ScanContext 路线 (`auto_init_pose.py` / `prior_kf_dir` / `prior_pose_json` /
+> line 390 的 `pose.json` KF pose) 依赖它做 place recognition, 现已**无自动来源** — 但该路线本就随
+> rsasaki 栈弃用. 当前主方案**架构 B 用 `GlobalMap.pcd`, 不受影响**. `saveMap` 仍照常输出
+> `GlobalMap.pcd` / `filterGlobalMap.pcd` / `trajectory.pcd` / `transformations.pcd`.
+
 **关键 3 件套 (rsasaki 时代用过, open3d_loc 不需要了)**:
 - `lidar_localization_ros2` (上游): NDT_OMP scan-to-map 跟踪, 接受 `/initialpose` (RViz click 或程式发) — 已弃用
 - `scripts/auto_init_pose.py`: 启动时用 ScanContext++ (`pyscancontext` pip 装) 把 bag1 226 KFs 建 DB, 头几帧自动匹配 → 发 `/initialpose` — 可复用做 init

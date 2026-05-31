@@ -1827,61 +1827,6 @@ void savePoseService(const std::shared_ptr<fast_lio_sam::srv::SavePose::Request>
 }
 
 /**
- * 输出HBA格式的数据
- */
-void outputHBA(const vector<pcl::PointCloud<PointType>::Ptr>& surfCloudKeyFrames,
-               const pcl::PointCloud<PointTypePose>::Ptr& cloudKeyPoses6D, const string& saveMapDirectory) {
-    // 创建pcd目录
-    string pcdDir = saveMapDirectory + "/pcd";
-    (void)system((string("mkdir -p ") + pcdDir).c_str());
-
-    // 保存每个关键帧的点云
-    for (size_t i = 0; i < surfCloudKeyFrames.size(); ++i) {
-        string pcdFile = pcdDir + "/" + to_string(i) + ".pcd";
-        pcl::io::savePCDFileBinary(pcdFile, *surfCloudKeyFrames[i]);
-    }
-
-    // 创建pose.json文件
-    string poseFile = saveMapDirectory + "/pose.json";
-    FILE* file = fopen(poseFile.c_str(), "w");
-    if (!file) {
-        cout << "Failed to open pose.json for writing" << endl;
-        return;
-    }
-
-    for (size_t i = 0; i < cloudKeyPoses6D->size(); ++i) {
-        // 获取body系下的位姿
-        PointTypePose pose_body = cloudKeyPoses6D->points[i];
-
-        // 构造T_w_b (world to body)
-        Eigen::Affine3f T_w_b_ = pcl::getTransformation(pose_body.x, pose_body.y, pose_body.z, pose_body.roll,
-                                                        pose_body.pitch, pose_body.yaw);
-        Eigen::Isometry3d T_w_b;
-        T_w_b.matrix() = T_w_b_.matrix().cast<double>();
-
-        // 构造T_b_lidar (body to lidar)
-        Eigen::Isometry3d T_b_lidar(state_point.offset_R_L_I);
-        T_b_lidar.pretranslate(state_point.offset_T_L_I);
-
-        // 计算T_w_lidar = T_w_b * T_b_lidar
-        Eigen::Isometry3d T_w_lidar = T_w_b * T_b_lidar;
-
-        // 提取平移
-        Eigen::Vector3d translation = T_w_lidar.translation();
-
-        // 提取旋转并转换为四元数
-        Eigen::Quaterniond quat(T_w_lidar.rotation());
-
-        // 写入JSON格式
-        fprintf(file, "%lf %lf %lf %lf %lf %lf %lf\n", translation.x(), translation.y(), translation.z(), quat.w(),
-                quat.x(), quat.y(), quat.z());
-    }
-    fclose(file);
-
-    cout << "HBA format output completed: " << surfCloudKeyFrames.size() << " PCD files and pose.json saved." << endl;
-}
-
-/**
  * 保存全局关键帧特征点集合
  */
 void saveMapService(const std::shared_ptr<fast_lio_sam::srv::SaveMap::Request> req, std::shared_ptr<fast_lio_sam::srv::SaveMap::Response> res) {
@@ -1960,9 +1905,6 @@ void saveMapService(const std::shared_ptr<fast_lio_sam::srv::SaveMap::Request> r
     rclcpp::Time timeLaserInfoStamp = rclcpp::Time(static_cast<int64_t>((lidar_end_time) * 1e9), RCL_ROS_TIME);
     string odometryFrame = "camera_init";
     publishCloud(pubOptimizedGlobalMap, globalSurfCloudDS, timeLaserInfoStamp, odometryFrame);
-
-    // 输出HBA格式的数据
-    outputHBA(surfCloudKeyFrames, cloudKeyPoses6D, saveMapDirectory);
 
     // res->success 已经在 ret==0 处赋好, 这里 void 收尾
 }
