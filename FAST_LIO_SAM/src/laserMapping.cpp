@@ -2776,6 +2776,17 @@ int main(int argc, char** argv) {
             // publish_effect_world(pubLaserCloudEffect);
             // publish_map(pubLaserCloudMap);
 
+            // 轻量心跳: 与 runtime_pos_log 的详细计时解耦, 始终每 100 帧打一行, 让 "建图在推进"
+            // 默认可见 —— 否则 runtime_pos_log=false 时主循环全程静默, 易被误判成卡死/失败 (#40).
+            {
+                static size_t mapping_heartbeat_cnt = 0;
+                if (++mapping_heartbeat_cnt % 100 == 0) {
+                    RCLCPP_INFO(rclcpp::get_logger("fastlio_mapping"),
+                                "[ mapping ]: processed %zu frames, pos[%.2f %.2f %.2f]", mapping_heartbeat_cnt,
+                                state_point.pos(0), state_point.pos(1), state_point.pos(2));
+                }
+            }
+
             /*** Debug variables ***/
             if (runtime_pos_log) {
                 frame_num++;
