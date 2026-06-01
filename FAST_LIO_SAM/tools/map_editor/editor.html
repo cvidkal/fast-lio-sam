@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>map_editor — 擦地图</title>
+<style>
+  :root { --bg:#1e1e22; --panel:#2a2a30; --fg:#e6e6e6; --accent:#4da3ff; --border:#3a3a42; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+               font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
+  #app { display:flex; flex-direction:column; height:100%; }
+  #toolbar { display:flex; align-items:center; gap:14px; padding:8px 12px;
+             background:var(--panel); border-bottom:1px solid var(--border); flex-wrap:wrap; }
+  .group { display:flex; align-items:center; gap:6px; }
+  .group .lbl { opacity:.7; font-size:12px; }
+  button { background:#34343c; color:var(--fg); border:1px solid var(--border);
+           border-radius:6px; padding:6px 10px; cursor:pointer; font-size:13px; }
+  button:hover { background:#3f3f48; }
+  button.brush.active { outline:2px solid var(--accent); background:#3a4a5e; }
+  button.primary { background:var(--accent); color:#06223f; border-color:var(--accent); font-weight:600; }
+  button:disabled { opacity:.4; cursor:not-allowed; }
+  .swatch { width:14px; height:14px; border:1px solid #888; border-radius:3px; display:inline-block; vertical-align:-2px; margin-right:4px; }
+  input[type=range] { width:120px; }
+  #status { margin-left:auto; font-size:12px; opacity:.8; white-space:nowrap; }
+  #stage { position:relative; flex:1; overflow:hidden; background:#15151a; }
+  #canvas { position:absolute; inset:0; width:100%; height:100%; cursor:crosshair; touch-action:none; }
+  #hint { position:absolute; left:10px; bottom:8px; font-size:11px; opacity:.55; pointer-events:none; }
+  #toast { position:absolute; left:50%; top:12px; transform:translateX(-50%);
+           background:#222; border:1px solid var(--border); padding:8px 14px; border-radius:8px;
+           font-size:13px; opacity:0; transition:opacity .2s; pointer-events:none; }
+  #toast.show { opacity:1; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="toolbar">
+    <div class="group">
+      <span class="lbl">笔刷</span>
+      <button class="brush active" data-mode="free"><span class="swatch" style="background:#fff"></span>擦除→free <kbd>1</kbd></button>
+      <button class="brush" data-mode="occ"><span class="swatch" style="background:#000"></span>障碍 <kbd>2</kbd></button>
+      <button class="brush" data-mode="unknown"><span class="swatch" style="background:#cdcdcd"></span>未知 <kbd>3</kbd></button>
+    </div>
+    <div class="group">
+      <span class="lbl">大小</span>
+      <input id="size" type="range" min="1" max="40" value="3">
+      <span id="sizeVal" class="lbl" style="width:42px">3 px</span>
+    </div>
+    <div class="group">
+      <button id="undo" title="Ctrl+Z">↶ 撤销</button>
+      <button id="fit" title="缩放适配">⤢ 适配</button>
+    </div>
+    <div class="group">
+      <button id="save" class="primary" title="Ctrl+S">💾 覆盖保存</button>
+    </div>
+    <div id="status">加载中…</div>
+  </div>
+  <div id="stage">
+    <canvas id="canvas"></canvas>
+    <div id="hint">滚轮缩放 · 空格/中键拖动平移 · 左键涂抹</div>
+    <div id="toast"></div>
+  </div>
+</div>
+<script>
+"use strict";
+const VAL = { free: 254, occ: 0, unknown: 205 };
+const cv = document.getElementById("canvas");
+const ctx = cv.getContext("2d");
+const statusEl = document.getElementById("status");
+const toastEl = document.getElementById("toast");
+
+let W = 0, H = 0, resolution = 0.05, origin = [0,0,0], filename = "";
+let label = null;            // Uint8Array(W*H) 权威像素值
+let off = null, offCtx = null, offImg = null;   // 离屏 1:1 画布
+let view = { scale: 1, ox: 0, oy: 0 };          // 视图变换 (屏幕px = grid*scale + o)
+let brush = "free", brushSize = 3;
+let painting = false, panning = false, spaceDown = false;
+let lastG = null, panStart = null;
+let strokeChanges = null;    // 本次 stroke 改过的 cell: Map(idx -> oldVal)
+const undoStack = [];
+const UNDO_MAX = 50;
+let dirty = false;
+
+function toast(msg) {
+  toastEl.textContent = msg; toastEl.classList.add("show");
+  clearTimeout(toast._t); toast._t = setTimeout(()=>toastEl.classList.remove("show"), 1600);
+}
+
+function resizeCanvas() {
+  const r = cv.getBoundingClientRect();
+  cv.width = Math.max(1, Math.round(r.width));
+  cv.height = Math.max(1, Math.round(r.height));
+  render();
+}
+
+function fitView() {
+  if (!W) return;
+  const pad = 0.95;
+  const s = Math.min(cv.width / W, cv.height / H) * pad;
+  view.scale = s;
+  view.ox = (cv.width - W * s) / 2;
+  view.oy = (cv.height - H * s) / 2;
+  render();
+}
+
+function screenToGrid(sx, sy) {
+  return { gx: Math.floor((sx - view.ox) / view.scale),
+           gy: Math.floor((sy - view.oy) / view.scale) };
+}
+
+function render() {
+  ctx.imageSmoothingEnabled = false;
+  ctx.fillStyle = "#15151a";
+  ctx.fillRect(0, 0, cv.width, cv.height);
+  if (!off) return;
+  ctx.drawImage(off, 0, 0, W, H, view.ox, view.oy, W * view.scale, H * view.scale);
+  // 地图外框
+  ctx.strokeStyle = "rgba(120,160,220,.5)";
+  ctx.lineWidth = 1;
+  ctx.strokeRect(view.ox + .5, view.oy + .5, W * view.scale, H * view.scale);
+  // 画笔预览
+  if (lastG && !panning) {
+    const cx = view.ox + (lastG.gx + 0.5) * view.scale;
+    const cy = view.oy + (lastG.gy + 0.5) * view.scale;
+    ctx.beginPath();
+    ctx.arc(cx, cy, Math.max(2, brushSize * view.scale), 0, Math.PI * 2);
+    ctx.strokeStyle = brush === "occ" ? "#ff5555" : (brush === "unknown" ? "#caa64a" : "#4da3ff");
+    ctx.lineWidth = 1.5; ctx.stroke();
+  }
+}
+
+function setCell(idx, v) {
+  if (label[idx] === v) return;
+  if (strokeChanges && !strokeChanges.has(idx)) strokeChanges.set(idx, label[idx]);
+  label[idx] = v;
+  const p = idx * 4;
+  offImg.data[p] = v; offImg.data[p+1] = v; offImg.data[p+2] = v; offImg.data[p+3] = 255;
+}
+
+function paintAt(gx, gy, v) {
+  const r = brushSize, r2 = r * r;
+  const x0 = Math.max(0, gx - r), x1 = Math.min(W - 1, gx + r);
+  const y0 = Math.max(0, gy - r), y1 = Math.min(H - 1, gy + r);
+  for (let y = y0; y <= y1; y++) {
+    const dy = y - gy;
+    for (let x = x0; x <= x1; x++) {
+      const dx = x - gx;
+      if (dx*dx + dy*dy <= r2) setCell(y * W + x, v);
+    }
+  }
+}
+
+// 沿 last->cur 插值涂抹, 快速拖动也不留缝
+function paintLine(g0, g1, v) {
+  const dx = g1.gx - g0.gx, dy = g1.gy - g0.gy;
+  const n = Math.max(Math.abs(dx), Math.abs(dy));
+  if (n === 0) { paintAt(g1.gx, g1.gy, v); return; }
+  for (let i = 0; i <= n; i++) {
+    paintAt(Math.round(g0.gx + dx * i / n), Math.round(g0.gy + dy * i / n), v);
+  }
+}
+
+function commitStroke() {
+  if (strokeChanges && strokeChanges.size) {
+    undoStack.push(strokeChanges);
+    if (undoStack.length > UNDO_MAX) undoStack.shift();
+    dirty = true;
+    updateStatus();
+  }
+  strokeChanges = null;
+  document.getElementById("undo").disabled = undoStack.length === 0;
+}
+
+function undo() {
+  const ch = undoStack.pop();
+  if (!ch) return;
+  for (const [idx, old] of ch.entries()) {
+    label[idx] = old;
+    const p = idx * 4;
+    offImg.data[p] = old; offImg.data[p+1] = old; offImg.data[p+2] = old; offImg.data[p+3] = 255;
+  }
+  offCtx.putImageData(offImg, 0, 0);
+  render();
+  document.getElementById("undo").disabled = undoStack.length === 0;
+  updateStatus();
+}
+
+function updateStatus(extra) {
+  let occ = 0, free = 0, unk = 0;
+  for (let i = 0; i < label.length; i++) {
+    const v = label[i];
+    if (v === VAL.occ) occ++; else if (v === VAL.free) free++; else if (v === VAL.unknown) unk++;
+  }
+  statusEl.textContent =
+    `${filename} · ${W}×${H} · occ ${occ.toLocaleString()} / free ${free.toLocaleString()} / unk ${unk.toLocaleString()}`
+    + (dirty ? " · 未保存*" : "") + (extra ? " · " + extra : "");
+}
+
+// ---- 事件 ----
+function pickMode(mode) {
+  brush = mode;
+  document.querySelectorAll(".brush").forEach(b =>
+    b.classList.toggle("active", b.dataset.mode === mode));
+}
+document.querySelectorAll(".brush").forEach(b =>
+  b.addEventListener("click", () => pickMode(b.dataset.mode)));
+
+const sizeInput = document.getElementById("size");
+const sizeVal = document.getElementById("sizeVal");
+sizeInput.addEventListener("input", () => {
+  brushSize = parseInt(sizeInput.value, 10);
+  sizeVal.textContent = brushSize + " px"; render();
+});
+
+document.getElementById("undo").addEventListener("click", undo);
+document.getElementById("fit").addEventListener("click", fitView);
+document.getElementById("save").addEventListener("click", save);
+
+cv.addEventListener("mousedown", (e) => {
+  cv.focus();
+  if (e.button === 1 || (e.button === 0 && spaceDown)) {
+    panning = true; panStart = { x: e.clientX, y: e.clientY, ox: view.ox, oy: view.oy };
+    e.preventDefault(); return;
+  }
+  if (e.button === 0) {
+    painting = true; strokeChanges = new Map();
+    const g = screenToGrid(...mouseXY(e));
+    paintAt(g.gx, g.gy, VAL[brush]); lastG = g;
+    offCtx.putImageData(offImg, 0, 0); render();
+  }
+});
+
+window.addEventListener("mousemove", (e) => {
+  const [sx, sy] = mouseXY(e);
+  if (panning && panStart) {
+    view.ox = panStart.ox + (e.clientX - panStart.x);
+    view.oy = panStart.oy + (e.clientY - panStart.y);
+    render(); return;
+  }
+  const g = screenToGrid(sx, sy);
+  if (painting) {
+    if (lastG) paintLine(lastG, g, VAL[brush]); else paintAt(g.gx, g.gy, VAL[brush]);
+    offCtx.putImageData(offImg, 0, 0);
+  }
+  lastG = g;
+  render();
+});
+
+window.addEventListener("mouseup", () => {
+  if (painting) { painting = false; commitStroke(); }
+  panning = false; panStart = null;
+});
+
+cv.addEventListener("mouseleave", () => { lastG = null; render(); });
+
+cv.addEventListener("wheel", (e) => {
+  e.preventDefault();
+  const [sx, sy] = mouseXY(e);
+  const gx = (sx - view.ox) / view.scale, gy = (sy - view.oy) / view.scale;
+  const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+  view.scale = Math.max(0.2, Math.min(120, view.scale * factor));
+  view.ox = sx - gx * view.scale;
+  view.oy = sy - gy * view.scale;
+  render();
+}, { passive: false });
+
+function mouseXY(e) {
+  const r = cv.getBoundingClientRect();
+  return [e.clientX - r.left, e.clientY - r.top];
+}
+
+window.addEventListener("keydown", (e) => {
+  if (e.code === "Space") { spaceDown = true; cv.style.cursor = "grab"; }
+  if (e.key === "1") pickMode("free");
+  if (e.key === "2") pickMode("occ");
+  if (e.key === "3") pickMode("unknown");
+  if (e.key === "[") { sizeInput.value = Math.max(1, brushSize-1); sizeInput.dispatchEvent(new Event("input")); }
+  if (e.key === "]") { sizeInput.value = Math.min(40, brushSize+1); sizeInput.dispatchEvent(new Event("input")); }
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") { e.preventDefault(); undo(); }
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") { e.preventDefault(); save(); }
+});
+window.addEventListener("keyup", (e) => {
+  if (e.code === "Space") { spaceDown = false; cv.style.cursor = "crosshair"; }
+});
+window.addEventListener("beforeunload", (e) => {
+  if (dirty) { e.preventDefault(); e.returnValue = ""; }
+});
+window.addEventListener("resize", resizeCanvas);
+
+// ---- 加载 / 保存 ----
+async function load() {
+  const r = await fetch("/api/map");
+  const j = await r.json();
+  if (!j.ok) { statusEl.textContent = "加载失败: " + (j.error || "?"); return; }
+  W = j.width; H = j.height; resolution = j.resolution; origin = j.origin; filename = j.filename;
+  const bin = atob(j.data);
+  label = new Uint8Array(W * H);
+  for (let i = 0; i < label.length; i++) label[i] = bin.charCodeAt(i);
+
+  off = document.createElement("canvas"); off.width = W; off.height = H;
+  offCtx = off.getContext("2d");
+  offImg = offCtx.createImageData(W, H);
+  for (let i = 0; i < label.length; i++) {
+    const v = label[i], p = i * 4;
+    offImg.data[p] = v; offImg.data[p+1] = v; offImg.data[p+2] = v; offImg.data[p+3] = 255;
+  }
+  offCtx.putImageData(offImg, 0, 0);
+  document.getElementById("undo").disabled = true;
+  resizeCanvas(); fitView(); updateStatus();
+}
+
+async function save() {
+  const btn = document.getElementById("save");
+  btn.disabled = true; btn.textContent = "保存中…";
+  try {
+    const r = await fetch("/api/save", {
+      method: "POST",
+      headers: { "Content-Type": "application/octet-stream" },
+      body: label,
+    });
+    const j = await r.json();
+    if (j.ok) { dirty = false; updateStatus(); toast("已覆盖保存 ✓"); }
+    else toast("保存失败: " + (j.error || "?"));
+  } catch (err) {
+    toast("保存出错: " + err);
+  } finally {
+    btn.disabled = false; btn.textContent = "💾 覆盖保存";
+  }
+}
+
+load();
+</script>
+</body>
+</html>
