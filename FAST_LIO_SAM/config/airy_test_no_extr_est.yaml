@@ -90,6 +90,7 @@
     historyKeyframeSearchTimeDiff: 30.0
     historyKeyframeSearchNum: 5      # 25 submap 污染 drift, 2 太稀; 5 平衡
     historyKeyframeFitnessScore: 0.02    # ICP 平均平方残差阈值 (m²); 0.02 ≈ 14cm RMS, 拒绝 cross-region 错配
+    loopClosureMaxDzCorrection: 2.0      # 回环 ICP |dz| 修正上限 (m); 室外 z 退化时 fitness 达标但 dz 几十米的错回环按此拒, <=0 关闭 (issue #57)
 
     # GPS
     useImuHeadingInitialization: false
