@@ -37,6 +37,11 @@
       fov_degree: 360.0
       det_range: 60.0
       extrinsic_est_en: false            # 外参在线估计 (无 DIFOP 真值时)
+      # 发散防护 (issue #53): 静止+近距遮挡时 ICP 失约束, 残余重力把速度积分成自由落体
+      zupt_en: true                      # IMU 静止时零速约束
+      zupt_gyr_thresh: 0.05              # rad/s, 帧内 gyro 均值低于此视为静止
+      zupt_acc_std_ratio: 0.03           # acc 模长 std/mean 低于此视为静止
+      max_velocity: 5.0                  # m/s, 狗的物理速度上限, IEKF 速度超过即截断
       # 真实外参 (IMU 装反 z 向下, LiDAR 朝上, ~180° 翻转).
       # identity 是错的, ba 会爆炸到 +2.7 m/s² 导致几公里漂移.
       extrinsic_T: [0.00425, 0.00418, -0.00446]

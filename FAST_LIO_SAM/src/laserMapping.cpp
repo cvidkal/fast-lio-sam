@@ -133,6 +133,13 @@ int kdtree_size_st = 0, kdtree_size_end = 0, add_point_size = 0, kdtree_delete_c
 bool runtime_pos_log = false, pcd_save_en = false, time_sync_en = false, extrinsic_est_en = true, path_en = true;
 int data_mode = 0;  // 0: default, 1: rosbag, 2: live
 string bag_path = "";
+
+// 发散防护 (issue #53): 静止 + 近距遮挡时 ICP 失去约束, 姿态误差的残余重力把速度
+// 积分成自由落体 (实测 30s 飞 -3790m). 静止 ZUPT + 速度物理上限两层兜底.
+bool zupt_en = true;
+double zupt_gyr_thresh = 0.05;     // rad/s, 帧内 gyro 模长均值低于此视为静止 (静止实测 ~0.01)
+double zupt_acc_std_ratio = 0.03;  // 帧内 acc 模长 std/mean 低于此视为静止 (单位无关, g 或 m/s² 都适用)
+double max_velocity = 10.0;        // m/s, IEKF 速度模长物理上限, 超过即认为退化发散并截断
 /**************************/
 
 float res_last[100000] = {0.0};  // 残差，点到面距离平方和
@@ -1512,6 +1519,24 @@ bool sync_packages(MeasureGroup& meas) {
     return true;
 }
 
+// 发散防护 (issue #53): 判断当前帧 IMU 窗口是否静止 (gyro 模长均值小 + acc 模长波动小).
+// 静止时给 IEKF 加零速约束, 防止退化场景下速度被残余重力积分跑飞.
+bool imuWindowStatic(const MeasureGroup &meas) {
+    if (meas.imu.size() < 5) return false;
+    double gyr_sum = 0, acc_sum = 0, acc_sq_sum = 0;
+    for (const auto &imu : meas.imu) {
+        gyr_sum += V3D(imu->angular_velocity.x, imu->angular_velocity.y, imu->angular_velocity.z).norm();
+        double a = V3D(imu->linear_acceleration.x, imu->linear_acceleration.y, imu->linear_acceleration.z).norm();
+        acc_sum += a;
+        acc_sq_sum += a * a;
+    }
+    const double n = double(meas.imu.size());
+    const double gyr_mean = gyr_sum / n;
+    const double acc_mean = acc_sum / n;
+    const double acc_std = std::sqrt(std::max(0.0, acc_sq_sum / n - acc_mean * acc_mean));
+    return gyr_mean < zupt_gyr_thresh && acc_mean > 1e-3 && acc_std / acc_mean < zupt_acc_std_ratio;
+}
+
 int process_increments = 0;
 void map_incremental() {
     PointVector PointToAdd;             // 需要加入到ikd-tree中的点云
@@ -2325,6 +2350,10 @@ int main(int argc, char** argv) {
     declare_param("feature_extract_enable",         false,              &p_pre->feature_enabled);
     declare_param("runtime_pos_log_enable",         false,              &runtime_pos_log);
     declare_param("mapping.extrinsic_est_en",       true,               &extrinsic_est_en);
+    declare_param("mapping.zupt_en",                true,               &zupt_en);
+    declare_param("mapping.zupt_gyr_thresh",        0.05,               &zupt_gyr_thresh);
+    declare_param("mapping.zupt_acc_std_ratio",     0.03,               &zupt_acc_std_ratio);
+    declare_param("mapping.max_velocity",           10.0,               &max_velocity);
     declare_param("pcd_save.pcd_save_en",           false,              &pcd_save_en);
     declare_param("pcd_save.interval",              -1,                 &pcd_save_interval);
     // 默认: 零平移 + 单位旋转, 防止跑空 ros2 run 时 [0..2] / [0..8] 越界 segfault
@@ -2674,6 +2703,36 @@ int main(int argc, char** argv) {
             double solve_H_time = 0;
             kf.update_iterated_dyn_share_modified(LASER_POINT_COV, solve_H_time);  // 预测、更新
             state_point = kf.get_x();
+
+            // 发散防护 (issue #53): 退化场景 (近距遮挡/静止) 下 ICP 失去约束时,
+            // 残余重力会把速度积分成自由落体. 两层兜底, 修正写回 IEKF:
+            //   1) ZUPT: IMU 静止 → 速度强制归零
+            //   2) 速度模长超物理上限 → 截断到上限
+            if (flg_EKF_inited) {
+                bool state_dirty = false;
+                const double vel_norm = state_point.vel.norm();
+                if (zupt_en && vel_norm > 1e-3 && imuWindowStatic(Measures)) {
+                    if (vel_norm > 0.5) {
+                        RCLCPP_WARN(rclcpp::get_logger("fastlio_mapping"),
+                                    "ZUPT: IMU static but vel=%.2f m/s, zeroed (degenerate scene?)", vel_norm);
+                    }
+                    state_point.vel = Zero3d;
+                    state_dirty = true;
+                }
+                if (state_point.vel.norm() > max_velocity) {
+                    static double last_clamp_warn = 0;
+                    if (omp_get_wtime() - last_clamp_warn > 1.0) {
+                        RCLCPP_WARN(rclcpp::get_logger("fastlio_mapping"),
+                                    "vel=%.1f m/s > max_velocity=%.1f, clamped (IEKF diverging?)",
+                                    state_point.vel.norm(), max_velocity);
+                        last_clamp_warn = omp_get_wtime();
+                    }
+                    state_point.vel *= max_velocity / state_point.vel.norm();
+                    state_dirty = true;
+                }
+                if (state_dirty) kf.change_x(state_point);
+            }
+
             euler_cur = SO3ToEuler(state_point.rot);
             pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;  // world系下lidar坐标
             geoQuat.x = state_point.rot.coeffs()[0];                                 // world系下当前imu的姿态四元数
