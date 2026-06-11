@@ -48,6 +48,9 @@ VAL_OCC = 0      # 占据 (黑)
 VAL_UNK = 205    # 未知 (灰)
 VAL_FREE = 254   # 自由 (白)
 
+# /download 允许的文件类型 (地图目录里的产物; 不开放任意文件)
+DOWNLOAD_EXTS = {".pcd", ".zip", ".pgm", ".yaml", ".png"}
+
 
 class MapState:
     """服务端持有的地图状态; handler 通过它读写."""
@@ -83,6 +86,27 @@ class MapState:
                 vals = line.split(":", 1)[1].strip().strip("[]")
                 parts = [p for p in vals.replace(",", " ").split() if p]
                 self.origin = [float(p) for p in parts[:3]] + [0.0] * (3 - len(parts[:3]))
+
+    def list_downloads(self) -> list[dict]:
+        """地图同目录下可下载的产物 (PCD / 压缩包 / 栅格图), 按文件名排序."""
+        out = []
+        map_dir = self.pgm_path.parent
+        for p in sorted(map_dir.iterdir()):
+            if p.is_file() and p.suffix.lower() in DOWNLOAD_EXTS:
+                out.append({"name": p.name, "size": p.stat().st_size})
+        return out
+
+    def resolve_download(self, name: str) -> Path | None:
+        """把 /download/<name> 解析成地图目录内的真实文件; 防穿越, 白名单后缀."""
+        if "/" in name or "\\" in name or name.startswith("."):
+            return None
+        map_dir = self.pgm_path.parent.resolve()
+        p = (map_dir / name).resolve()
+        if p.parent != map_dir or not p.is_file():
+            return None
+        if p.suffix.lower() not in DOWNLOAD_EXTS:
+            return None
+        return p
 
     def to_payload(self) -> dict:
         with self.lock:
@@ -149,8 +173,36 @@ def make_handler(state: MapState):
                 self._send(200, html, "text/html; charset=utf-8")
             elif self.path == "/api/map":
                 self._send_json(state.to_payload())
+            elif self.path == "/api/files":
+                self._send_json({"ok": True, "files": state.list_downloads()})
+            elif self.path.startswith("/download/"):
+                self._serve_download(self.path[len("/download/"):])
             else:
                 self._send(404, b"not found", "text/plain; charset=utf-8")
+
+        def _serve_download(self, raw_name: str) -> None:
+            from urllib.parse import unquote
+            p = state.resolve_download(unquote(raw_name))
+            if p is None:
+                self._send(404, b"no such downloadable file", "text/plain; charset=utf-8")
+                return
+            size = p.stat().st_size
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(size))
+            self.send_header("Content-Disposition", f'attachment; filename="{p.name}"')
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            # GlobalMap.pcd 可达上百 MB, 分块流式发, 不整块进内存
+            with p.open("rb") as f:
+                while True:
+                    chunk = f.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    try:
+                        self.wfile.write(chunk)
+                    except (BrokenPipeError, ConnectionResetError):
+                        return
 
         def do_POST(self):  # noqa: N802
             if self.path != "/api/save":
