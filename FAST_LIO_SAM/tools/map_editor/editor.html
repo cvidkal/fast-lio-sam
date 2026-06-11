@@ -53,6 +53,11 @@
     <div class="group">
       <button id="save" class="primary" title="Ctrl+S">💾 覆盖保存</button>
     </div>
+    <div class="group">
+      <select id="dlSel" title="地图目录下可下载的产物"
+              style="background:#34343c;color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:4px 6px;max-width:230px"></select>
+      <button id="dl">⬇ 下载</button>
+    </div>
     <div id="status">加载中…</div>
   </div>
   <div id="stage">
@@ -307,7 +312,35 @@ async function load() {
   offCtx.putImageData(offImg, 0, 0);
   document.getElementById("undo").disabled = true;
   resizeCanvas(); fitView(); updateStatus();
+  loadDownloads();
 }
+
+function fmtSize(n) {
+  if (n >= 1048576) return (n / 1048576).toFixed(1) + " MB";
+  if (n >= 1024) return (n / 1024).toFixed(0) + " KB";
+  return n + " B";
+}
+
+async function loadDownloads() {
+  const sel = document.getElementById("dlSel");
+  try {
+    const r = await fetch("/api/files");
+    const j = await r.json();
+    sel.innerHTML = "";
+    for (const f of (j.files || [])) {
+      const o = document.createElement("option");
+      o.value = f.name;
+      o.textContent = f.name + " (" + fmtSize(f.size) + ")";
+      sel.appendChild(o);
+    }
+    document.getElementById("dl").disabled = sel.options.length === 0;
+  } catch (e) { document.getElementById("dl").disabled = true; }
+}
+
+document.getElementById("dl").addEventListener("click", () => {
+  const sel = document.getElementById("dlSel");
+  if (sel.value) window.location = "/download/" + encodeURIComponent(sel.value);
+});
 
 async function save() {
   const btn = document.getElementById("save");
