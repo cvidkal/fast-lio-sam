@@ -51,6 +51,10 @@ VAL_FREE = 254   # 自由 (白)
 # /download 允许的文件类型 (地图目录里的产物; 不开放任意文件)
 DOWNLOAD_EXTS = {".pcd", ".zip", ".pgm", ".yaml", ".png"}
 
+# 按源文件后缀决定保存格式, 避免把 PPM 内容写进 .png 名字 (会让 map_server 读到名实不符的图).
+# 缺省走 PPM (P5 PGM), 跟历史行为一致.
+SUFFIX_TO_FORMAT = {".png": "PNG", ".pgm": "PPM", ".ppm": "PPM", ".pbm": "PPM"}
+
 
 class MapState:
     """服务端持有的地图状态; handler 通过它读写."""
@@ -166,9 +170,10 @@ class MapState:
                 shutil.copy2(self.pgm_path, bak)
                 self._backed_up = True
                 print(f"[INFO] 已备份原图 -> {bak}")
-            # 原子写: 临时文件同目录, 再 os.replace
+            # 原子写: 临时文件同目录, 再 os.replace; 保存格式跟源文件后缀一致
+            fmt = SUFFIX_TO_FORMAT.get(self.pgm_path.suffix.lower(), "PPM")
             tmp = self.pgm_path.with_suffix(self.pgm_path.suffix + ".tmp")
-            Image.fromarray(new_arr, mode="L").save(tmp, format="PPM")
+            Image.fromarray(new_arr, mode="L").save(tmp, format=fmt)
             os.replace(tmp, self.pgm_path)
             self.arr = new_arr.copy()
         n_occ = int((new_arr == VAL_OCC).sum())
@@ -257,7 +262,7 @@ def make_handler(state: MapState):
 def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("pgm", type=Path, help="要编辑的 nav2 占据栅格图 (.pgm)")
+    ap.add_argument("pgm", type=Path, help="要编辑的 nav2 占据栅格图 (.pgm 或 .png)")
     ap.add_argument("--port", type=int, default=8000, help="本地端口 (默认 8000)")
     ap.add_argument("--host", default="127.0.0.1", help="绑定地址 (默认 127.0.0.1)")
     ap.add_argument("--no-browser", action="store_true", help="不自动打开浏览器")
@@ -270,8 +275,9 @@ def main() -> int:
     if not pgm.is_file():   # is_file() 会跟随软链, 目标在就为真
         print(f"[ERR] 找不到 PGM: {pgm}", file=sys.stderr)
         return 2
-    if pgm.suffix.lower() != ".pgm":
-        print(f"[WARN] {pgm.name} 后缀不是 .pgm, 仍按灰度图尝试加载", file=sys.stderr)
+    if pgm.suffix.lower() not in SUFFIX_TO_FORMAT:
+        print(f"[WARN] {pgm.name} 后缀不在 {sorted(SUFFIX_TO_FORMAT)} 内, "
+              f"仍按灰度图加载, 保存回退成 PPM 格式", file=sys.stderr)
 
     try:
         state = MapState(pgm, backup=args.backup)
