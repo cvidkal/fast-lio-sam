@@ -56,15 +56,24 @@ class MapState:
     """服务端持有的地图状态; handler 通过它读写."""
 
     def __init__(self, pgm_path: Path, backup: bool):
-        self.pgm_path = pgm_path.expanduser().resolve()
-        self.yaml_path = self.pgm_path.with_suffix(".yaml")
+        # 故意不在这里 resolve(): src_path 可能是 /opt/dog/map/current_map/map.pgm 这种
+        # 软链路径, 保留它才能在每次算图后 current_map 重指时自动跟随到最新图 (maybe_reload).
+        self.src_path = pgm_path.expanduser()
         self.backup = backup
         self._backed_up = False
         self.lock = threading.Lock()
+        self._sig = None
+        self._load()  # 设定 pgm_path / arr / height / width / yaml / resolution / origin / _sig
 
-        img = Image.open(self.pgm_path).convert("L")
+    def _load(self) -> None:
+        """从 src_path 解析到的当前真实 PGM 读入内存。调用方需持锁 (或在单线程 __init__ 里)。"""
+        resolved = self.src_path.resolve()
+        img = Image.open(resolved).convert("L")
         self.arr = np.array(img, dtype=np.uint8)   # (H, W), row 0 = 图像上边
         self.height, self.width = self.arr.shape
+        self.pgm_path = resolved                   # 保存仍写回这张具体图
+        self.yaml_path = resolved.with_suffix(".yaml")
+        self._backed_up = False                    # 换图了, 备份标记重置
 
         # 从 yaml 读 resolution / origin (仅用于前端坐标读数; 缺了也能跑)
         self.resolution = 0.05
@@ -75,6 +84,30 @@ class MapState:
             except Exception as e:  # noqa: BLE001
                 print(f"[WARN] 解析 {self.yaml_path.name} 失败 ({e}); 用默认 res/origin",
                       file=sys.stderr)
+        try:
+            self._sig = (str(resolved), resolved.stat().st_mtime)
+        except OSError:
+            self._sig = (str(resolved), None)
+
+    def maybe_reload(self) -> None:
+        """current_map 软链重指 / 源 PGM 被重建时自动重载, 免手动重启 editor。
+        在每个 GET 前调用; 没变化就是一次 stat, 开销可忽略。"""
+        try:
+            resolved = self.src_path.resolve()
+            sig = (str(resolved), resolved.stat().st_mtime)
+        except OSError:
+            return  # 源暂时不可达 (例如部署换链的瞬间), 沿用旧图
+        if sig == self._sig:
+            return
+        with self.lock:
+            if sig == self._sig:   # 双检, 防并发重复重载
+                return
+            try:
+                self._load()
+            except Exception as e:  # noqa: BLE001
+                print(f"[WARN] 自动重载地图失败 ({e}); 沿用旧图", file=sys.stderr)
+                return
+        print(f"[INFO] 检测到地图更新, 已重载 -> {self.pgm_path}")
 
     def _parse_yaml(self, path: Path) -> None:
         # map.yaml 很简单, 手解析避免引入 PyYAML 依赖.
@@ -163,6 +196,7 @@ def make_handler(state: MapState):
             self._send(code, json.dumps(obj).encode("utf-8"), "application/json")
 
         def do_GET(self):  # noqa: N802
+            state.maybe_reload()  # 跟随 current_map: 算图后浏览器刷新即见最新图, 无需重启
             if self.path in ("/", "/index.html"):
                 try:
                     html = EDITOR_HTML.read_bytes()
@@ -231,8 +265,9 @@ def main() -> int:
                     help="第一次保存前把源 .pgm 复制成 .pgm.bak")
     args = ap.parse_args()
 
-    pgm = args.pgm.expanduser().resolve()
-    if not pgm.is_file():
+    # 不 resolve(): 传软链路径 (如 .../current_map/map.pgm) 给 MapState, 让它能跟随重指。
+    pgm = args.pgm.expanduser()
+    if not pgm.is_file():   # is_file() 会跟随软链, 目标在就为真
         print(f"[ERR] 找不到 PGM: {pgm}", file=sys.stderr)
         return 2
     if pgm.suffix.lower() != ".pgm":
