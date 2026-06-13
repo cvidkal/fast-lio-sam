@@ -251,6 +251,7 @@ float historyKeyframeSearchRadius;    // 回环检测 radius kdtree搜索半径
 float historyKeyframeSearchTimeDiff;  //  帧间时间阈值
 int historyKeyframeSearchNum;         //   回环时多少个keyframe拼成submap
 float historyKeyframeFitnessScore;    // icp 匹配阈值
+float loopClosureMaxDzCorrection;     // 回环 ICP |dz| 修正上限 (m), <=0 关闭 (issue #57)
 bool potentialLoopFlag = false;
 
 rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubHistoryKeyFrames;  // loop history keyframe submap
@@ -1067,6 +1068,19 @@ void performLoopClosure() {
     Eigen::Affine3f correctionLidarFrame;
     correctionLidarFrame = icp.getFinalTransformation();
 
+    // |dz| 合理性闸门 (issue #57): 室外 z 退化场景 (开阔地面/重复植被) 下, ICP 可能
+    // fitness 达标但给出几十米的 z 修正 — fitness 衡量贴合残差, 对这种错位天生盲.
+    // 前端 z 真漂到需要回环修几米以上的程度早就发散了, 直接按修正量拒.
+    float dz_icp = correctionLidarFrame(2, 3);
+    if (loopClosureMaxDzCorrection > 0.0f && std::fabs(dz_icp) > loopClosureMaxDzCorrection) {
+        std::cout << "LOOP REJECT cur=" << loopKeyCur << " <-> pre=" << loopKeyPre
+                  << "  fitness=" << icp.getFitnessScore()
+                  << "  |dz_correction|=" << std::fabs(dz_icp)
+                  << " > loopClosureMaxDzCorrection=" << loopClosureMaxDzCorrection
+                  << std::endl;
+        return;
+    }
+
     // 闭环优化前当前帧位姿
     Eigen::Affine3f tWrong = pclPointToAffine3f(copy_cloudKeyPoses6D->points[loopKeyCur]);
     // 闭环优化后当前帧位姿
@@ -1083,7 +1097,6 @@ void performLoopClosure() {
     Vector6 << rot_var, rot_var, rot_var, trans_var, trans_var, trans_var;
     gtsam::noiseModel::Diagonal::shared_ptr constraintNoise = gtsam::noiseModel::Diagonal::Variances(Vector6);
     // 详细 log: 闭哪两个 KF + ICP 出的相对 z 差 + 时间差
-    float dz_icp = correctionLidarFrame(2, 3);
     float dt_kf = (copy_cloudKeyPoses6D->points[loopKeyCur].time - copy_cloudKeyPoses6D->points[loopKeyPre].time);
     std::cout << "LOOP cur=" << loopKeyCur << " <-> pre=" << loopKeyPre
               << "  dt=" << dt_kf << "s"
@@ -2388,6 +2401,7 @@ int main(int argc, char** argv) {
     declare_param("historyKeyframeSearchTimeDiff",  30.0f, &historyKeyframeSearchTimeDiff);
     declare_param("historyKeyframeSearchNum",       25,    &historyKeyframeSearchNum);
     declare_param("historyKeyframeFitnessScore",    0.3f,  &historyKeyframeFitnessScore);
+    declare_param("loopClosureMaxDzCorrection",     2.0f,  &loopClosureMaxDzCorrection);
 
     // gnss
     declare_param("common.gnss_topic",   std::string("/gps/fix"), &gnss_topic);
