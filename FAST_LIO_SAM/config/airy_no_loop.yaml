@@ -43,7 +43,9 @@
                            0.0, 0.0, 1.0]
 
     pcd_save:
-      pcd_save_en: true
+      # interval=-1 otherwise retains every registered scan and eventually
+      # OOMs on long bags; savePCD below remains enabled for map output.
+      pcd_save_en: false
       interval: -1
 
     feature_extract_enable: false

@@ -54,7 +54,10 @@
                            0.0, 0.0, 1.0]
 
     pcd_save:
-      pcd_save_en: true
+      # Raw scan accumulation grows for the entire run when interval=-1 and
+      # can exhaust memory on long mapping bags. The keyframe map is still
+      # written on shutdown through savePCD below.
+      pcd_save_en: false
       interval: -1
 
     feature_extract_enable: false

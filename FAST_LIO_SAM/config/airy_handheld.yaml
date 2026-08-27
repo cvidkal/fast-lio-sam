@@ -69,7 +69,9 @@
                            0.0, 0.0, 1.0]
 
     pcd_save:
-      pcd_save_en: true
+      # Avoid retaining every registered scan until shutdown. savePCD below
+      # still writes the optimized keyframe map used by map_bag.sh.
+      pcd_save_en: false
       interval: -1
 
     feature_extract_enable: false
